@@ -77,8 +77,9 @@ type AuthServers struct {
 
 	Zone string
 
-	List []*AuthServer
-	Nss  []string
+	List         []*AuthServer
+	MasterServer string
+	Nss          []string
 
 	CheckingDisable bool
 	Checked         bool

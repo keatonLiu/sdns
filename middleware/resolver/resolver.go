@@ -17,7 +17,6 @@ import (
 	"github.com/semihalev/sdns/config"
 	"github.com/semihalev/sdns/dnsutil"
 	"github.com/semihalev/sdns/middleware"
-	"golang.org/x/exp/slices"
 )
 
 // Resolver type
@@ -370,6 +369,21 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 		authservers, foundv4, foundv6 := r.checkGlueRR(resp, nss, level)
 		authservers.CheckingDisable = cd
 		authservers.Zone = q.Name
+		// cache expired
+		//if el, err := r.ncache.Get(key); err == cache.ErrCacheExpired {
+		//	masterIpv4, _ := r.getIPv4Cache(el.Servers.MasterServer)
+		//}
+		reqSOA := req.Copy()
+		for ns := range nss {
+			reqSOA.SetQuestion(ns, dns.TypeSOA)
+			break
+		}
+
+		resSoa, err := r.Resolve(ctx, reqSOA, authservers, true, 30, 0, false, nil)
+		if err != nil {
+			return nil, err
+		}
+		fmt.Println("resSoa.Answer[0].String():", resSoa.Answer[0].String())
 
 		r.lookupV4Nss(ctx, q, authservers, key, parentdsrr, foundv4, nss, cd)
 
@@ -706,6 +720,7 @@ func (r *Resolver) checkGlueRR(resp *dns.Msg, nss nameservers, level int) (*auth
 func (r *Resolver) addIPv4Cache(nsipv4 map[string][]string) {
 	for name, addrs := range nsipv4 {
 		key := cache.Hash(dns.Question{Name: name, Qtype: dns.TypeA})
+
 		r.ipv4cache.Add(key, addrs)
 	}
 }
@@ -1163,15 +1178,24 @@ func (r *Resolver) searchCache(q dns.Question, cd bool, origin string) (servers 
 	ns, err := r.ncache.Get(key)
 
 	if err == nil {
-		if slices.Contains(ns.Servers.Nss, "ns1.baidu.com.") {
-			fmt.Println("found ns cache: ", ns.Servers.List)
-			if nsOld, ok := r.getIPv4Cache("ns1.baidu.com."); ok {
-				fmt.Println("found ipv4 cache: ", nsOld)
-			}
-			if nsOld, ok := r.getIPv6Cache("ns1.baidu.com."); ok {
-				fmt.Println("found ipv6 cache: ", nsOld)
-			}
-		}
+		//if slices.Contains(ns.Servers.Nss, "ns1.baidu.com.") {
+		//	// pinning ipv4 auth server addresses
+		//	pinningAddr := "110.242.68.134"
+		//	authServer := ns.Servers.List[0]
+		//	authServer.Addr = pinningAddr
+		//	ns.Servers.List = []*authcache.AuthServer{authServer}
+		//
+		//
+		//	r.ncache.Set(key, ns.DSRR, ns.Servers, ns.TTL)
+		//
+		//	fmt.Println("found ns cache: ", ns.Servers.List)
+		//	if nsOld, ok := r.getIPv4Cache("ns1.baidu.com."); ok {
+		//		fmt.Println("found ipv4 cache: ", nsOld, "for", q.Name)
+		//	}
+		//	if nsOld, ok := r.getIPv6Cache("ns1.baidu.com."); ok {
+		//		fmt.Println("found ipv6 cache: ", nsOld, "for", q.Name)
+		//	}
+		//}
 
 		if atomic.LoadUint32(&ns.Servers.ErrorCount) >= 10 {
 			// we have fatal errors from all servers, lets clear cache and try again
