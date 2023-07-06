@@ -315,6 +315,7 @@ func sortnss(nss nameservers, qname string) []string {
 	}
 
 	sort.Strings(list)
+	// 把和要查询域名最为接近的（从右往左重合度更高）NS放在最前面
 	sort.Slice(list, func(i, j int) bool {
 		return dns.CompareDomainName(qname, list[i]) < dns.CompareDomainName(qname, list[j])
 	})

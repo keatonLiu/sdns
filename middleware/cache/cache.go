@@ -5,7 +5,10 @@ package cache
 
 import (
 	"context"
+	"fmt"
+	"github.com/semihalev/log"
 	"math"
+	"net"
 	"os"
 	"strings"
 	"sync"
@@ -130,6 +133,7 @@ func (c *Cache) ServeDNS(ctx context.Context, ch *middleware.Chain) {
 		return
 	}
 
+	// 如果不需要递归解析，那么不应该查询这个服务器，应该直接去问权威
 	if q.Name != "." && !req.RecursionDesired {
 		ch.CancelWithRcode(dns.RcodeServerFailure, false)
 
@@ -137,7 +141,7 @@ func (c *Cache) ServeDNS(ctx context.Context, ch *middleware.Chain) {
 	}
 
 	key := cache.Hash(dns.Question{Name: q.Name, Qtype: dns.TypeNULL})
-
+	//fmt.Println("w.Internal:", w.Internal())
 	if !w.Internal() {
 		c.wg.Wait(key)
 	}
@@ -151,6 +155,7 @@ func (c *Cache) ServeDNS(ctx context.Context, ch *middleware.Chain) {
 			goto next
 		}
 
+		// 超出频率限制
 		if !w.Internal() && c.rate > 0 && !i.Limiter.Allow() {
 			//no reply to client
 			ch.Cancel()
@@ -161,6 +166,7 @@ func (c *Cache) ServeDNS(ctx context.Context, ch *middleware.Chain) {
 			threshold := math.Ceil(float64(c.prefetch) / 100 * float64(i.origTTL))
 
 			if i.ttl(now) <= int(threshold) {
+				fmt.Println("prefetching")
 				i.prefetching = true
 				c.pcache.Add(key, i)
 				pr := req.Copy()
@@ -168,8 +174,11 @@ func (c *Cache) ServeDNS(ctx context.Context, ch *middleware.Chain) {
 			}
 		}
 
+		// 通过缓存构建响应
 		m := i.toMsg(req, now)
+		//fmt.Println("w.Internal() after: ", w.Internal())
 
+		log.Debug(fmt.Sprint("cache hit for: ", req.Question[0].Name))
 		if !w.Internal() {
 			m = c.additionalAnswer(ctx, m)
 		}
@@ -245,6 +254,27 @@ func (w *ResponseWriter) WriteMsg(res *dns.Msg) error {
 
 	if duration > 0 {
 		w.set(key, res, mt, duration)
+		// TODO: can modify cache here
+		if res.Question[0].Name == "www.baidu.com." && res.Question[0].Qtype == dns.TypeA {
+			log.Debug("Modifying cache")
+			if i, ok := w.pcache.Get(key); ok {
+				itm := i.(*item)
+				itm.Answer = []dns.RR{
+					&dns.A{
+						Hdr: dns.RR_Header{
+							Name:   "www.baidu.com.",
+							Rrtype: dns.TypeA,
+							Class:  dns.ClassINET,
+						},
+						A: net.ParseIP("10.10.10.10"),
+					},
+				}
+				itm.origTTL = 150
+				w.pcache.Add(key, i)
+			} else {
+				log.Debug("Cache not found")
+			}
+		}
 	}
 
 	if !w.Internal() {

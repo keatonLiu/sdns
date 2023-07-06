@@ -77,7 +77,6 @@ func Setup(cfg *config.Config) {
 	}
 
 	m.cfg = cfg
-
 	LoadExternalPlugins()
 
 	m.mu.Lock()

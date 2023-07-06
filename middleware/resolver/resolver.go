@@ -17,6 +17,7 @@ import (
 	"github.com/semihalev/sdns/config"
 	"github.com/semihalev/sdns/dnsutil"
 	"github.com/semihalev/sdns/middleware"
+	"golang.org/x/exp/slices"
 )
 
 // Resolver type
@@ -150,7 +151,6 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 	// RFC 7816 query minimization. There are some concerns in RFC.
 	// Current default minimize level 5, if we down to level 3, performance gain 20%
 	minReq, minimized := r.minimize(req, level, nomin)
-
 	log.Debug("Query inserted", "reqid", minReq.Id, "zone", servers.Zone, "query", formatQuestion(minReq.Question[0]), "cd", req.CheckingDisabled, "qname-minimize", minimized)
 
 	resp, err := r.groupLookup(ctx, minReq, servers)
@@ -177,8 +177,32 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 		return nil, err
 	}
 
+	//fmt.Println("===============test=================")
+	//fmt.Println("Level:", level)
+	//fmt.Println("Depth:", depth)
+	//fmt.Println("root:", root)
+	//fmt.Println("authServers:")
+	//for _, authServer := range servers.List {
+	//	fmt.Println(" - ", authServer.Addr)
+	//}
+	//fmt.Println("From Answer, NS for", minReq.Question[0].Name)
+	//for _, ans := range resp.Answer {
+	//	if ns, ok := ans.(*dns.NS); ok {
+	//		fmt.Println(ns.Ns)
+	//	}
+	//}
+	//
+	//fmt.Println("From Authoritative, NS for", minReq.Question[0].Name)
+	//for _, ans := range resp.Ns {
+	//	if ns, ok := ans.(*dns.NS); ok {
+	//		fmt.Println(ns.Ns)
+	//	}
+	//}
+	//fmt.Println("====================================")
+
 	resp = r.setTags(req, resp)
 
+	// 响应出错，查下一层域名
 	if resp.Rcode != dns.RcodeSuccess && len(resp.Answer) == 0 && len(resp.Ns) == 0 {
 		if minimized {
 			level++
@@ -187,6 +211,7 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 		return resp, nil
 	}
 
+	// 没有缩小域名，说明收到了原域名的答案，直接返回结果
 	if !minimized && len(resp.Answer) > 0 {
 		// this is like auth server external cname error but this can be recover.
 		if resp.Rcode == dns.RcodeServerFailure && len(resp.Answer) > 0 {
@@ -200,12 +225,15 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 		return r.answer(ctx, req, resp, parentdsrr, extra...)
 	}
 
+	// 如果缩小了，但没有收到任何响应，尝试增加一层域名，继续查询
 	if minimized && (len(resp.Answer) == 0 && len(resp.Ns) == 0) || len(resp.Answer) > 0 {
 		level++
 		return r.Resolve(ctx, req, servers, false, depth, level, nomin, parentdsrr)
 	}
 
+	// 处理权威应答
 	if len(resp.Ns) > 0 {
+		// 如果目前是解析域名的上级域名，而且在权威应答中存在SOA或者CNAME记录，则继续查下一层
 		if minimized {
 			for _, rr := range resp.Ns {
 				if _, ok := rr.(*dns.SOA); ok {
@@ -224,6 +252,7 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 
 		soa := false
 		nss := make(nameservers)
+		// 从权威应答中抽取出Nameserver的名字，做个集合
 		for _, rr := range resp.Ns {
 			if _, ok := rr.(*dns.SOA); ok {
 				soa = true
@@ -433,6 +462,7 @@ func (r *Resolver) lookupV4Nss(ctx context.Context, q dns.Question, authservers 
 			continue
 		}
 
+		// 检查NS解析环
 		ctx, loop := r.checkLoop(ctx, name, dns.TypeA)
 		if loop {
 			if _, ok := r.getIPv4Cache(name); !ok {
@@ -634,6 +664,7 @@ func (r *Resolver) checkGlueRR(resp *dns.Msg, nss nameservers, level int) (*auth
 	}
 
 	nsipv4 := make(map[string][]string)
+	// 找DNS响应中的additional section，看有没有胶水记录即NS-->IP地址映射
 	for _, a := range resp.Extra {
 		if extra, ok := a.(*dns.A); ok {
 			name := strings.ToLower(extra.Header().Name)
@@ -641,6 +672,7 @@ func (r *Resolver) checkGlueRR(resp *dns.Msg, nss nameservers, level int) (*auth
 
 			i, _ := dns.PrevLabel(qname, level)
 
+			// 检测如果该胶水记录并不是当前查询域名（可能是原域名的上级域名，由level指定上级层数）的下级，则跳过
 			if dns.CompareDomainName(name, qname[i:]) < level {
 				// we cannot trust that glue, it doesn't cover in the origin name.
 				continue
@@ -658,7 +690,8 @@ func (r *Resolver) checkGlueRR(resp *dns.Msg, nss nameservers, level int) (*auth
 				foundv4[name] = struct{}{}
 
 				nsipv4[name] = append(nsipv4[name], extra.A.String())
-				authservers.List = append(authservers.List, authcache.NewAuthServer(net.JoinHostPort(extra.A.String(), "53"), authcache.IPv4))
+				authservers.List = append(authservers.List, authcache.NewAuthServer(
+					net.JoinHostPort(extra.A.String(), "53"), authcache.IPv4))
 			}
 		}
 	}
@@ -897,9 +930,9 @@ func (r *Resolver) lookup(ctx context.Context, req *dns.Msg, servers *authcache.
 
 	authcache.Sort(serversList, atomic.AddUint64(&servers.Called, 1))
 
-	responseErrors := []*dns.Msg{}
-	configErrors := []*dns.Msg{}
-	fatalErrors := []error{}
+	var responseErrors []*dns.Msg
+	var configErrors []*dns.Msg
+	var fatalErrors []error
 
 	returned := make(chan struct{})
 	defer close(returned)
@@ -1130,6 +1163,16 @@ func (r *Resolver) searchCache(q dns.Question, cd bool, origin string) (servers 
 	ns, err := r.ncache.Get(key)
 
 	if err == nil {
+		if slices.Contains(ns.Servers.Nss, "ns1.baidu.com.") {
+			fmt.Println("found ns cache: ", ns.Servers.List)
+			if nsOld, ok := r.getIPv4Cache("ns1.baidu.com."); ok {
+				fmt.Println("found ipv4 cache: ", nsOld)
+			}
+			if nsOld, ok := r.getIPv6Cache("ns1.baidu.com."); ok {
+				fmt.Println("found ipv6 cache: ", nsOld)
+			}
+		}
+
 		if atomic.LoadUint32(&ns.Servers.ErrorCount) >= 10 {
 			// we have fatal errors from all servers, lets clear cache and try again
 			r.ncache.Remove(key)

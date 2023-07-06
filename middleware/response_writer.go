@@ -43,10 +43,10 @@ func (w *responseWriter) Reset(writer dns.ResponseWriter) {
 	w.rcode = dns.RcodeSuccess
 
 	switch writer.LocalAddr().(type) {
-	case (*net.TCPAddr):
+	case *net.TCPAddr:
 		w.proto = "tcp"
 		w.remoteip = w.RemoteAddr().(*net.TCPAddr).IP
-	case (*net.UDPAddr):
+	case *net.UDPAddr:
 		w.proto = "udp"
 		w.remoteip = w.RemoteAddr().(*net.UDPAddr).IP
 	}
