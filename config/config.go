@@ -55,6 +55,7 @@ type Config struct {
 	Chaos            bool
 	QnameMinLevel    int `toml:"qname_min_level"`
 	EmptyZones       []string
+	MonitorZones     []string
 
 	Plugins map[string]Plugin
 

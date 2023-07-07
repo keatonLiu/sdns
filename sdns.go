@@ -57,7 +57,6 @@ func setup() {
 
 	log.Root().SetLevel(lvl)
 	log.Root().SetHandler(log.LvlFilterHandler(lvl, log.StdoutHandler))
-
 	middleware.Setup(cfg)
 }
 

@@ -2,6 +2,7 @@ package authcache
 
 import (
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -32,6 +33,16 @@ func NewAuthServer(addr string, version Version) *AuthServer {
 	return &AuthServer{
 		Addr:    addr,
 		Version: version,
+	}
+}
+
+func GetVersion(addr string) Version {
+	if strings.Contains(addr, ".") {
+		return IPv4
+	} else if strings.Contains(addr, ":") {
+		return IPv6
+	} else {
+		return 0
 	}
 }
 
@@ -78,7 +89,7 @@ type AuthServers struct {
 	Zone string
 
 	List         []*AuthServer
-	MasterServer string
+	MasterServer *Master
 	Nss          []string
 
 	CheckingDisable bool

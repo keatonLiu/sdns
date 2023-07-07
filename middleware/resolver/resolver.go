@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"golang.org/x/exp/slices"
 	"net"
 	"sort"
 	"strings"
@@ -33,6 +34,8 @@ type Resolver struct {
 	// glue addrs cache
 	ipv4cache *cache.Cache
 	ipv6cache *cache.Cache
+
+	masterCache *authcache.MasterCache
 
 	rootkeys []dns.RR
 
@@ -70,6 +73,8 @@ func NewResolver(cfg *config.Config) *Resolver {
 
 		ipv4cache: cache.New(defaultCacheSize),
 		ipv6cache: cache.New(defaultCacheSize),
+
+		masterCache: authcache.NewMasterCache(),
 
 		qnameMinLevel: cfg.QnameMinLevel,
 		netTimeout:    defaultTimeout,
@@ -369,21 +374,6 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 		authservers, foundv4, foundv6 := r.checkGlueRR(resp, nss, level)
 		authservers.CheckingDisable = cd
 		authservers.Zone = q.Name
-		// cache expired
-		//if el, err := r.ncache.Get(key); err == cache.ErrCacheExpired {
-		//	masterIpv4, _ := r.getIPv4Cache(el.Servers.MasterServer)
-		//}
-		reqSOA := req.Copy()
-		for ns := range nss {
-			reqSOA.SetQuestion(ns, dns.TypeSOA)
-			break
-		}
-
-		resSoa, err := r.Resolve(ctx, reqSOA, authservers, true, 30, 0, false, nil)
-		if err != nil {
-			return nil, err
-		}
-		fmt.Println("resSoa.Answer[0].String():", resSoa.Answer[0].String())
 
 		r.lookupV4Nss(ctx, q, authservers, key, parentdsrr, foundv4, nss, cd)
 
@@ -396,7 +386,184 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 			return nil, errors.New("nameservers are unreachable")
 		}
 
-		r.ncache.Set(key, parentdsrr, authservers, time.Duration(nsrr.Header().Ttl)*time.Second)
+		// ============== Hook ================
+		// cache expired
+		//if el, err := r.ncache.Get(key); err == cache.ErrCacheExpired {
+		//	masterIpv4, _ := r.getIPv4Cache(el.Servers.MasterServer)
+		//}
+
+		noHook := ctx.Value(ctxKey("noHook"))
+		if (noHook == nil || !noHook.(bool)) && slices.Contains(r.cfg.MonitorZones, authservers.Zone) {
+			fmt.Println("===============Start querying SOA=================")
+			fmt.Println("Looking for SOA from:", authservers.Zone)
+			reqSOA := req.Copy()
+
+			reqSOA.SetQuestion(authservers.Zone, dns.TypeSOA)
+			resSOA, err := r.Resolve(context.WithValue(ctx, ctxKey("noHook"), true), reqSOA,
+				authservers, true, 30, 0, false, nil)
+			if err != nil {
+				log.Error(fmt.Sprint("res SOA resolve failed for", authservers.Zone, "authServers", authservers))
+				return nil, err
+			}
+
+			oldMasterServer, _ := r.masterCache.Get(authservers.Zone)
+
+			var newMasterServer *authcache.Master
+			var masterServerName string
+
+			masterServerName = findMasterServerFromSOAResponse(resSOA)
+			if masterServerAddrs, ok := r.getIPCache(masterServerName); ok {
+				newMasterServer = &authcache.Master{
+					Name:  masterServerName,
+					Addrs: masterServerAddrs,
+					Zone:  authservers.Zone,
+				}
+				authservers.MasterServer = newMasterServer
+				r.masterCache.Set(newMasterServer)
+
+			} else {
+				log.Warn(fmt.Sprint("Master server cache not found! ", masterServerName, " ", nss))
+				log.Warn(fmt.Sprint(authservers.Zone))
+				addrs, err := r.lookupNSAddrV4(context.WithValue(ctx, ctxKey("noHook"), true), masterServerName, true)
+				if err != nil {
+					return nil, err
+				}
+				r.addIPv4Cache(map[string][]string{
+					masterServerName: addrs,
+				})
+			}
+
+			// simulate changed master
+			//newMasterServer.Name = "no.such.server."
+
+			fmt.Println("Master Name Server from parent:", newMasterServer)
+			if oldMasterServer == nil {
+				fmt.Println("Init Master Name Server")
+
+			} else {
+				//newMasterServer.Addrs = []string{"123.123.123.123"}
+				//oldMasterServer.Name = "a.dns.cn."
+				oldAuthServers := &authcache.AuthServers{
+					MasterServer:    oldMasterServer,
+					List:            []*authcache.AuthServer{},
+					Nss:             []string{oldMasterServer.Name},
+					Zone:            authservers.Zone,
+					Checked:         authservers.Checked,
+					CheckingDisable: authservers.CheckingDisable,
+				}
+				for _, addr := range oldMasterServer.Addrs {
+					oldAuthServers.List = append(oldAuthServers.List,
+						authcache.NewAuthServer(addr, authcache.GetVersion(addr)))
+				}
+
+				newAddresses := getNewAddrs(newMasterServer.Addrs, oldMasterServer.Addrs)
+
+				if len(newAddresses) > 0 {
+					for _, addr := range newAddresses {
+						log.Warn(fmt.Sprint("[Cache check]Detected new master server address:", addr))
+					}
+
+					// further check old Master Server
+					// =========Asking old Server to find the real Master Server address (A)======
+					var masterIpsFromOldMaster []string
+					masterIpsFromOldMaster, err = r.getIpAddressesForName(ctx, oldMasterServer.Name, oldAuthServers)
+					if err != nil {
+						goto endHook
+					}
+					if len(masterIpsFromOldMaster) > 0 {
+						fmt.Println("real Master Server ips: ", masterIpsFromOldMaster)
+					} else {
+						fmt.Printf("real Master Server ips for %v Not found!\n", oldMasterServer.Name)
+					}
+
+					newAddresses = getNewAddrs(newMasterServer.Addrs, masterIpsFromOldMaster)
+					if len(newAddresses) > 0 {
+						for _, addr := range newAddresses {
+							log.Warn(fmt.Sprint("[Old Master check]Detected new master server address:", addr))
+						}
+						// Set master server address to [master ips] from old master server
+						newMasterServer.Addrs = masterIpsFromOldMaster
+					} else {
+						log.Info("[Old Master check]Master Name Server address not change!")
+					}
+
+					if oldMasterServer.Name != newMasterServer.Name {
+						log.Warn(fmt.Sprint("[From cache]Master Name Server name changed! old Server:",
+							oldMasterServer.Name, "new Server:", newMasterServer.Name))
+
+						// =========Asking old Server to find the real Master Server name (SOA)===
+						log.Info(fmt.Sprint("Asking old Server to find the real Master Server name (SOA)"))
+
+						reqSOA := req.Copy()
+						reqSOA.SetQuestion(authservers.Zone, dns.TypeSOA)
+						resSOA, err := r.Resolve(context.WithValue(ctx, ctxKey("noHook"), true),
+							reqSOA, oldAuthServers, true, 30, 0, false, nil)
+						if err != nil {
+							return nil, err
+						}
+						masterNameFromOldMaster := findMasterServerFromSOAResponse(resSOA)
+						fmt.Println("real Master Server name:", masterNameFromOldMaster)
+
+						if masterNameFromOldMaster != newMasterServer.Name {
+							log.Warn(fmt.Sprint("[From old Master]Master Name Server name changed! old Server:",
+								oldMasterServer.Name, "new Server:", newMasterServer.Name))
+						} else {
+							log.Info(fmt.Sprint("[From old Master]Master Name Server name not change!"))
+						}
+
+						// =========================================================================
+
+						// =========Asking old Server to find the real Master Server address (A)======
+						//var masterIpsFromOldMaster []string
+						//masterIpsFromOldMaster, err = r.getIpAddressesForName(ctx, oldMasterServer.Name, oldAuthServers)
+						//if err != nil {
+						//	goto endHook
+						//}
+						//if len(masterIpsFromOldMaster) > 0 {
+						//	fmt.Println("masterIpsFromOldMaster: ", masterIpsFromOldMaster)
+						//} else {
+						//	fmt.Println("masterIpsFromOldMaster Not found!")
+						//}
+
+						// New Master Server Addr is in the glue records
+						//var masterIpsFromRoot []string
+						//masterIpsFromRoot, err = r.getIpAddressesForName(ctx, newMasterServer.Name, r.rootservers)
+						//if err != nil {
+						//	goto endHook
+						//}
+						//if len(masterIpsFromRoot) > 0 {
+						//	fmt.Println("masterIpsFromRoot: ", masterIpsFromRoot)
+						//} else {
+						//	fmt.Println("masterIpsFromRoot Not found!")
+						//}
+						// ===============================================
+
+						// check the Addr difference between old and new master
+						//newAddresses := getNewAddrs(newMasterServer.Addrs, masterIpsFromOldMaster)
+						//
+						//if len(newAddresses) > 0 {
+						//	for _, addr := range newAddresses {
+						//		log.Warn(fmt.Sprint("Detected new master server address:", addr))
+						//	}
+						//} else {
+						//	log.Info("[Old Master check]Master Name Server address not change!")
+						//}
+
+						// =========================================================================
+					}
+				} else {
+					log.Info("[Cache check]Master Name Server address not change!")
+				}
+
+			}
+
+			fmt.Println("===================================================")
+		}
+
+	endHook:
+		//r.ncache.Set(key, parentdsrr, authservers, time.Duration(nsrr.Header().Ttl)*time.Second)
+		r.ncache.Set(key, parentdsrr, authservers, 5)
+
 		log.Debug("Nameserver cache insert", "key", key, "query", formatQuestion(q), "cd", cd)
 
 		//copy reqid
@@ -423,6 +590,78 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 	m.Extra = req.Extra
 
 	return m, nil
+}
+
+func getNewAddrs(newMasterIps []string, oldMasterIps []string) []string {
+	newAddrs := make([]string, 0)
+	for _, addr := range newMasterIps {
+		if !slices.Contains(oldMasterIps, addr) {
+			newAddrs = append(newAddrs, addr)
+		}
+	}
+	return newAddrs
+}
+
+func (r *Resolver) getIpAddressesForName(ctx context.Context, name string, authServers *authcache.AuthServers) ([]string, error) {
+	ips := make([]string, 0)
+	reqA := &dns.Msg{}
+	reqA.SetQuestion(name, dns.TypeA)
+	resA, err := r.Resolve(context.WithValue(ctx, ctxKey("noHook"), true), reqA,
+		authServers, true, 30, 0, false, nil)
+	if err != nil {
+		log.Warn(fmt.Sprintf("Error asking A record for: %v", name))
+		return nil, err
+	}
+
+	for _, rr := range resA.Answer {
+		if a, ok := rr.(*dns.A); ok {
+			ips = append(ips, a.A.String())
+		}
+	}
+
+	reqAAAA := &dns.Msg{}
+	reqAAAA.SetQuestion(name, dns.TypeAAAA)
+	resAAAA, err := r.Resolve(context.WithValue(ctx, ctxKey("noHook"), true), reqAAAA,
+		authServers, true, 30, 0, false, nil)
+	if err != nil {
+		log.Warn(fmt.Sprintf("Error asking AAAA record for: %v", name))
+		return nil, err
+	}
+
+	for _, rr := range resAAAA.Answer {
+		if a, ok := rr.(*dns.AAAA); ok {
+			ips = append(ips, a.AAAA.String())
+		}
+	}
+	return ips, nil
+}
+
+func findMasterServerFromSOAResponse(resSOA *dns.Msg) string {
+	var masterServerName string
+	for _, rr := range resSOA.Ns {
+		if soa, ok := rr.(*dns.SOA); ok {
+			masterServerName = soa.Ns
+			break
+		}
+	}
+	if masterServerName == "" {
+		for _, rr := range resSOA.Answer {
+			if soa, ok := rr.(*dns.SOA); ok {
+				masterServerName = soa.Ns
+				break
+			}
+		}
+	}
+
+	if masterServerName == "" {
+		for _, rr := range resSOA.Extra {
+			if soa, ok := rr.(*dns.SOA); ok {
+				masterServerName = soa.Ns
+				break
+			}
+		}
+	}
+	return masterServerName
 }
 
 func (r *Resolver) groupLookup(ctx context.Context, req *dns.Msg, servers *authcache.AuthServers) (resp *dns.Msg, err error) {
@@ -752,6 +991,17 @@ func (r *Resolver) getIPv6Cache(name string) ([]string, bool) {
 	}
 
 	return []string{}, false
+}
+
+func (r *Resolver) getIPCache(name string) ([]string, bool) {
+	var totalIps []string
+	if ips, ok := r.getIPv4Cache(name); ok {
+		totalIps = append(totalIps, ips...)
+	}
+	if ips, ok := r.getIPv6Cache(name); ok {
+		totalIps = append(totalIps, ips...)
+	}
+	return totalIps, len(totalIps) > 0
 }
 
 func (r *Resolver) removeIPv6Cache(name string) {
