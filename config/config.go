@@ -55,7 +55,7 @@ type Config struct {
 	Chaos            bool
 	QnameMinLevel    int `toml:"qname_min_level"`
 	EmptyZones       []string
-	MonitorZones     []string
+	MonitorZones     []string `toml:"monitor_zones"`
 
 	Plugins map[string]Plugin
 
@@ -254,6 +254,9 @@ qname_min_level = 5
 # ]
 emptyzones = []
 
+# Set the zones to monitor
+monitor_zones = []
+
 # You can add your own plugins to sdns. The plugin order is very important. 
 # Plugins can be load before cache middleware.
 # Config keys should be string and values can be anything.
@@ -262,6 +265,7 @@ emptyzones = []
 #     [plugins.example]
 #     path = "exampleplugin.so"
 #     config = {key_1 = "value_1", key_2 = 2, key_3 = true}	
+
 `
 
 // Load loads the given config file

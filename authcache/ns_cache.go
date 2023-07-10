@@ -105,9 +105,8 @@ func (n *NSCache) Set(key uint64, dsRR []dns.RR, servers *AuthServers, ttl time.
 		ttl = maximumTTL
 	} else if ttl < minimumTTL {
 		ttl = time.Duration(5) * time.Second
+		//ttl = minimumTTL
 	}
-	// Test expire name server cache
-	//ttl = 10
 
 	n.cache.Add(key, &NS{
 		Servers: servers,
