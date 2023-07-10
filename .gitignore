@@ -7,3 +7,4 @@ coverage.out
 blist_data
 access.log
 vendor
+go_build_sdns_go
