@@ -205,6 +205,7 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 		if resp.Rcode == dns.RcodeNameError {
 			return r.authority(ctx, req, resp, parentdsrr, req.Question[0].Qtype)
 		}
+
 		return r.answer(ctx, req, resp, parentdsrr, extra...)
 	}
 
@@ -369,24 +370,16 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 			oldMasterServer, _ := r.masterCache.Get(authservers.Zone)
 
 			fmt.Println("=======================Start=======================")
-			log.Info(fmt.Sprint("Looking for SOA for: ", authservers.Zone))
-			reqSOA := req.Copy()
+			log.Info(fmt.Sprint("Looking for SOA of zone: ", authservers.Zone))
+			resSOA, err := r.getSOA(ctx, req, authservers.Zone, authservers)
 
-			reqSOA.SetQuestion(authservers.Zone, dns.TypeSOA)
-			resSOA, err := r.Resolve(context.WithValue(ctx, ctxKey("noHook"), true), reqSOA,
-				authservers, false, 30, 0, true, nil)
 			if err != nil {
 				log.Error(fmt.Sprint("res SOA resolve failed for zone: ", authservers.Zone,
-					" using authServers: ", authservers))
+					" using authServers: ", authservers.List))
 
-				log.Warn(fmt.Sprintf("No MasterServer found for zone: %v, using old master: %v",
-					authservers.Zone, oldMasterServer))
-				authservers.List = make([]*authcache.AuthServer, 0)
-				for _, addr := range oldMasterServer.Addrs {
-					authservers.List = append(authservers.List, &authcache.AuthServer{
-						Addr:    net.JoinHostPort(addr, "53"),
-						Version: authcache.GetVersion(addr),
-					})
+				log.Warn(fmt.Sprintf("No MasterServer found for zone: %v", authservers.Zone))
+				if oldMasterServer != nil {
+					authservers = buildAuthServersFromMasterServer(oldMasterServer, authservers)
 				}
 				goto endHook
 			}
@@ -394,7 +387,7 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 			var newMasterServer *authcache.Master
 			var masterServerName string
 
-			masterServerName = findMasterServerFromSOAResponse(resSOA)
+			masterServerName = findMasterServerNameFromSOAResponse(resSOA)
 			if masterServerAddrs, ok := r.getIPCache(masterServerName); ok {
 				newMasterServer = &authcache.Master{
 					Name:  masterServerName,
@@ -402,7 +395,7 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 					Zone:  authservers.Zone,
 				}
 				authservers.MasterServer = newMasterServer
-				fmt.Println("masterServerAddrs: ", masterServerAddrs)
+				//fmt.Println("masterServerAddrs: ", masterServerAddrs)
 			} else {
 				log.Warn(fmt.Sprint("Master server cache not found! ", masterServerName, " ", nss))
 				log.Warn(fmt.Sprint(authservers.Zone))
@@ -418,7 +411,7 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 			// simulate changed master
 			//newMasterServer.Name = "no.such.server."
 
-			log.Info(fmt.Sprint("Master Server from parent: ", newMasterServer))
+			log.Info(fmt.Sprint("[From parent]Master Server: ", newMasterServer))
 			if oldMasterServer == nil {
 				log.Warn(fmt.Sprint("Init Master Server"))
 				r.masterCache.Set(newMasterServer)
@@ -428,91 +421,81 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 				//newMasterServer.Addrs = []string{"123.123.123.123"}
 				//newMasterServer.Name = "no.such.server"
 				//oldMasterServer.Name = "a.dns.cn."
-				log.Info(fmt.Sprint("Old Master Server: ", oldMasterServer))
-				oldAuthServers := &authcache.AuthServers{
-					MasterServer:    oldMasterServer,
-					List:            []*authcache.AuthServer{},
-					Nss:             []string{oldMasterServer.Name},
-					Zone:            authservers.Zone,
-					Checked:         authservers.Checked,
-					CheckingDisable: authservers.CheckingDisable,
+				log.Info(fmt.Sprint("[From cache]Old Master Server: ", oldMasterServer))
+				oldAuthServers := buildAuthServersFromMasterServer(oldMasterServer, authservers)
+
+				newAddrs := extractNewAddrs(newMasterServer.Addrs, oldMasterServer.Addrs)
+
+				if len(newAddrs) == 0 && oldMasterServer.Name == newMasterServer.Name {
+					log.Info("[From cache]Master server not change, skip asking old master")
+					goto endHook
 				}
-				for _, addr := range oldMasterServer.Addrs {
-					oldAuthServers.List = append(oldAuthServers.List,
-						authcache.NewAuthServer(net.JoinHostPort(addr, "53"), authcache.GetVersion(addr)))
+				if len(newAddrs) > 0 {
+					log.Warn(fmt.Sprint("[From cache]Detected new master server address: ", newAddrs))
+				} else {
+					log.Info("[From cache]Master Server address not change!")
 				}
+				if oldMasterServer.Name != newMasterServer.Name {
+					log.Warn(fmt.Sprint("[From cache]Master Server name changed! ",
+						oldMasterServer.Name, " ==> ", newMasterServer.Name))
+				} else {
+					log.Info("[From cache]Master Server name not change!")
+				}
+
+				// 名字改了，但ip没改，查到旧主权威的SOA之后，如果相同，就不查ip了吗，万一旧主权威返回的ip变了
 
 				realMasterServer := authcache.Master{
 					Zone: authservers.Zone,
 				}
-
-				newAddrs := getNewAddrs(newMasterServer.Addrs, oldMasterServer.Addrs)
-				// 检测到新的主权威IP地址
-				if len(newAddrs) > 0 {
-					log.Warn(fmt.Sprint("[Cache check]Detected new master server address: ", newAddrs))
-
-					fmt.Println("oldAuthServers: ", oldAuthServers)
-					// =========Asking old Server to find the real Master Server address (A)======
-					realMasterServer.Addrs, err = r.getIpAddressesForName(ctx, oldMasterServer.Name, oldAuthServers)
-					if err != nil {
-						log.Error("[From old Master]Failed to get Master Server address from old Master")
-						goto endHook
-					}
-					fmt.Println(realMasterServer)
-					if len(realMasterServer.Addrs) > 0 {
-						log.Info(fmt.Sprint("[From old Master]Real Master Server ips: ", realMasterServer.Addrs))
-					} else {
-						log.Error(fmt.Sprintf("[From old Master]Real Master Server ips for %v Not found!",
-							oldMasterServer.Name))
-					}
-
-					newIpsComparedToOldMaster := getNewAddrs(newMasterServer.Addrs, realMasterServer.Addrs)
-					if len(newIpsComparedToOldMaster) > 0 {
-						log.Warn(fmt.Sprint("[Old Master check]Detected new master server address: ",
-							newIpsComparedToOldMaster))
-						verified = false
-
-						// Change authservers to the old master server
-						authservers = oldAuthServers
-					} else {
-						log.Info("[Old Master check]Master Server address changed but verified!")
-					}
-
+				// =========Asking old Server to find the real Master Server name (SOA)===
+				log.Info(fmt.Sprint("Asking old Server to find the real Master Server name (SOA)"))
+				realMasterServer.Name, err = r.getMasterServerName(ctx, req, authservers.Zone, oldAuthServers)
+				if err != nil {
+					log.Error(fmt.Sprint("Failed to get Master Server name from old Master: ", err.Error()))
+					goto endHook
 				} else {
-					log.Info("[Cache check]Master Server address not change!")
+					log.Info(fmt.Sprint("[From old Master]Real Master Server name: ", realMasterServer.Name))
+				}
+
+				// =========Asking old Server to find the real Master Server address (A)======
+				realMasterServer.Addrs, err = r.getIpAddressesForName(ctx, realMasterServer.Name, oldAuthServers)
+				if err != nil {
+					log.Error("[From old Master]Failed to get Master Server address from old Master")
+					goto endHook
+				}
+
+				if len(realMasterServer.Addrs) > 0 {
+					log.Info(fmt.Sprint("[From old Master]Real Master Server ips: ", realMasterServer.Addrs))
+				} else {
+					log.Error(fmt.Sprintf("[From old Master]Real Master Server ips for %v Not found!",
+						oldMasterServer.Name))
+				}
+
+				// 检测到新的主权威IP地址
+				newIpsComparedToOldMaster := extractNewAddrs(newMasterServer.Addrs, realMasterServer.Addrs)
+				if len(newIpsComparedToOldMaster) > 0 {
+					log.Warn(fmt.Sprint("[Old Master check]Detected new master server address: ",
+						newIpsComparedToOldMaster))
+					verified = false
+				} else {
+					log.Info(fmt.Sprint("[From old Master]Same Master Server address!"))
 				}
 
 				// 检测到新的主权威名
-				if oldMasterServer.Name != newMasterServer.Name {
-					log.Warn(fmt.Sprint("[From cache]Master Server name changed! ",
+				if realMasterServer.Name != newMasterServer.Name {
+					log.Warn(fmt.Sprint("[From old Master]Master Server name changed! ",
 						oldMasterServer.Name, " ==> ", newMasterServer.Name))
-
-					// =========Asking old Server to find the real Master Server name (SOA)===
-					log.Info(fmt.Sprint("Asking old Server to find the real Master Server name (SOA)"))
-
-					resSOA, err := r.getSOA(ctx, req, authservers.Zone, oldAuthServers)
-					if err != nil {
-						return nil, err
-					}
-
-					realMasterServer.Name = findMasterServerFromSOAResponse(resSOA)
-					log.Info(fmt.Sprint("[From old Master]Real Master Server name: ", realMasterServer.Name))
-
-					if realMasterServer.Name != newMasterServer.Name {
-						log.Warn(fmt.Sprint("[From old Master]Master Server name changed! ",
-							oldMasterServer.Name, " ==> ", newMasterServer.Name))
-						verified = false
-
-						// Change authservers to the old master server
-						authservers = oldAuthServers
-					} else {
-						log.Info(fmt.Sprint("[From old Master]Master Server name not change!"))
-					}
+					verified = false
+				} else {
+					log.Info(fmt.Sprint("[From old Master]Same Master Server name!"))
 				}
 
 				if verified {
-					log.Warn("Save new master server cache")
+					log.Warn("Save new master server to cache")
 					r.masterCache.Set(newMasterServer)
+				} else {
+					// Change authservers to the old master server
+					authservers = oldAuthServers
 				}
 			}
 			fmt.Println("===================================================")
@@ -550,6 +533,28 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 	return m, nil
 }
 
+func buildAuthServersFromMasterServer(oldMasterServer *authcache.Master, authservers *authcache.AuthServers) *authcache.AuthServers {
+	oldAuthServers := &authcache.AuthServers{
+		MasterServer:    oldMasterServer,
+		List:            []*authcache.AuthServer{},
+		Nss:             []string{oldMasterServer.Name},
+		Zone:            authservers.Zone,
+		Checked:         authservers.Checked,
+		CheckingDisable: authservers.CheckingDisable,
+	}
+	for _, addr := range oldMasterServer.Addrs {
+		oldAuthServers.List = append(oldAuthServers.List,
+			authcache.NewAuthServer(net.JoinHostPort(addr, "53"), authcache.GetVersion(addr)))
+	}
+	return oldAuthServers
+}
+
+func (r *Resolver) getMasterServerName(ctx context.Context, req *dns.Msg, zone string, oldAuthServers *authcache.AuthServers) (string, error) {
+	resSOA, err := r.getSOA(ctx, req, zone, oldAuthServers)
+	realMasterServerName := findMasterServerNameFromSOAResponse(resSOA)
+	return realMasterServerName, err
+}
+
 func (r *Resolver) getSOA(ctx context.Context, req *dns.Msg, zone string, oldAuthServers *authcache.AuthServers) (*dns.Msg, error) {
 	reqSOA := req.Copy()
 	reqSOA.SetQuestion(zone, dns.TypeSOA)
@@ -558,7 +563,7 @@ func (r *Resolver) getSOA(ctx context.Context, req *dns.Msg, zone string, oldAut
 	return resSOA, err
 }
 
-func getNewAddrs(newMasterIps []string, oldMasterIps []string) []string {
+func extractNewAddrs(newMasterIps []string, oldMasterIps []string) []string {
 	newAddrs := make([]string, 0)
 	for _, addr := range newMasterIps {
 		if !slices.Contains(oldMasterIps, addr) {
@@ -601,7 +606,7 @@ func (r *Resolver) getIpAddressesForName(ctx context.Context, name string, authS
 	return ips, nil
 }
 
-func findMasterServerFromSOAResponse(resSOA *dns.Msg) string {
+func findMasterServerNameFromSOAResponse(resSOA *dns.Msg) string {
 	var masterServerName string
 	for _, rr := range resSOA.Ns {
 		if soa, ok := rr.(*dns.SOA); ok {
@@ -1075,6 +1080,35 @@ func (r *Resolver) answer(ctx context.Context, req, resp *dns.Msg, parentdsrr []
 
 	resp = r.clearAdditional(req, resp, extra...)
 
+	if req.Question[0].Qtype == dns.TypeNS {
+		for _, rr := range resp.Answer {
+			if rr.Header().Rrtype == dns.TypeNS {
+				name := rr.(*dns.NS).Ns
+				if iPv4, ok := r.getIPv4Cache(name); ok {
+					resp.Extra = append(resp.Extra, &dns.A{
+						Hdr: dns.RR_Header{
+							Name:   name,
+							Rrtype: dns.TypeA,
+							Class:  dns.ClassINET,
+							Ttl:    rr.Header().Ttl,
+						},
+						A: net.ParseIP(iPv4[0]),
+					})
+				}
+				if ipv6, ok := r.getIPv6Cache(name); ok {
+					resp.Extra = append(resp.Extra, &dns.AAAA{
+						Hdr: dns.RR_Header{
+							Name:   name,
+							Rrtype: dns.TypeAAAA,
+							Class:  dns.ClassINET,
+							Ttl:    rr.Header().Ttl,
+						},
+						AAAA: net.ParseIP(ipv6[0]),
+					})
+				}
+			}
+		}
+	}
 	return resp, nil
 }
 
