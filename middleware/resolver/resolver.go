@@ -374,20 +374,33 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 			resSOA, err := r.getSOA(ctx, req, authservers.Zone, authservers)
 
 			if err != nil {
-				log.Error(fmt.Sprint("res SOA resolve failed for zone: ", authservers.Zone,
+				log.Error(fmt.Sprint("Res SOA resolve failed for zone: ", authservers.Zone,
 					" using authServers: ", authservers.List))
 
 				log.Warn(fmt.Sprintf("No MasterServer found for zone: %v", authservers.Zone))
+				// 如果有缓存，使用缓存中的旧主权威
 				if oldMasterServer != nil {
-					authservers = buildAuthServersFromMasterServer(oldMasterServer, authservers)
+					authservers = buildAuthServersFromMasterServer(oldMasterServer, cd)
 				}
+				// 否则只能正常返回
 				goto endHook
 			}
 
 			var newMasterServer *authcache.Master
-			var masterServerName string
+			var masterServerName = findMasterServerNameFromSOAResponse(resSOA)
 
-			masterServerName = findMasterServerNameFromSOAResponse(resSOA)
+			// 响应中没有找到主权威SOA记录
+			if masterServerName == "" {
+				log.Warn(fmt.Sprintf("[From parent]No MasterServer found "+
+					"for zone: %v", authservers.Zone))
+				// 如果有缓存，使用缓存中的旧主权威
+				if oldMasterServer != nil {
+					authservers = buildAuthServersFromMasterServer(oldMasterServer, cd)
+				}
+				// 否则只能正常返回
+				goto endHook
+			}
+
 			if masterServerAddrs, ok := r.getIPCache(masterServerName); ok {
 				newMasterServer = &authcache.Master{
 					Name:  masterServerName,
@@ -399,6 +412,7 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 			} else {
 				log.Warn(fmt.Sprint("Master server cache not found! ", masterServerName, " ", nss))
 				log.Warn(fmt.Sprint(authservers.Zone))
+
 				addrs, err := r.lookupNSAddrV4(context.WithValue(ctx, ctxKey("noHook"), true), masterServerName, true)
 				if err != nil {
 					return nil, err
@@ -422,7 +436,7 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 				//newMasterServer.Name = "no.such.server"
 				//oldMasterServer.Name = "a.dns.cn."
 				log.Info(fmt.Sprint("[From cache]Old Master Server: ", oldMasterServer))
-				oldAuthServers := buildAuthServersFromMasterServer(oldMasterServer, authservers)
+				oldAuthServers := buildAuthServersFromMasterServer(oldMasterServer, cd)
 
 				newAddrs := extractNewAddrs(newMasterServer.Addrs, oldMasterServer.Addrs)
 
@@ -443,21 +457,20 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 				}
 
 				// 名字改了，但ip没改，查到旧主权威的SOA之后，如果相同，就不查ip了吗，万一旧主权威返回的ip变了
-
 				realMasterServer := authcache.Master{
 					Zone: authservers.Zone,
 				}
-				// =========Asking old Server to find the real Master Server name (SOA)===
+				// =========Asking old Server to find the real Master Server name (SOA)===============
 				log.Info(fmt.Sprint("Asking old Server to find the real Master Server name (SOA)"))
 				realMasterServer.Name, err = r.getMasterServerName(ctx, req, authservers.Zone, oldAuthServers)
 				if err != nil {
-					log.Error(fmt.Sprint("Failed to get Master Server name from old Master: ", err.Error()))
+					log.Error(fmt.Sprint("Failed to get Master Server name from old Master: ", err))
 					goto endHook
 				} else {
 					log.Info(fmt.Sprint("[From old Master]Real Master Server name: ", realMasterServer.Name))
 				}
 
-				// =========Asking old Server to find the real Master Server address (A)======
+				// =========Asking old Server to find the real Master Server address (A | AAAA)======
 				realMasterServer.Addrs, err = r.getIpAddressesForName(ctx, realMasterServer.Name, oldAuthServers)
 				if err != nil {
 					log.Error("[From old Master]Failed to get Master Server address from old Master")
@@ -533,14 +546,14 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 	return m, nil
 }
 
-func buildAuthServersFromMasterServer(oldMasterServer *authcache.Master, authservers *authcache.AuthServers) *authcache.AuthServers {
+func buildAuthServersFromMasterServer(oldMasterServer *authcache.Master, cd bool) *authcache.AuthServers {
 	oldAuthServers := &authcache.AuthServers{
 		MasterServer:    oldMasterServer,
 		List:            []*authcache.AuthServer{},
 		Nss:             []string{oldMasterServer.Name},
-		Zone:            authservers.Zone,
-		Checked:         authservers.Checked,
-		CheckingDisable: authservers.CheckingDisable,
+		Zone:            oldMasterServer.Zone,
+		Checked:         true,
+		CheckingDisable: cd,
 	}
 	for _, addr := range oldMasterServer.Addrs {
 		oldAuthServers.List = append(oldAuthServers.List,
@@ -551,8 +564,11 @@ func buildAuthServersFromMasterServer(oldMasterServer *authcache.Master, authser
 
 func (r *Resolver) getMasterServerName(ctx context.Context, req *dns.Msg, zone string, oldAuthServers *authcache.AuthServers) (string, error) {
 	resSOA, err := r.getSOA(ctx, req, zone, oldAuthServers)
+	if err != nil {
+		return "", err
+	}
 	realMasterServerName := findMasterServerNameFromSOAResponse(resSOA)
-	return realMasterServerName, err
+	return realMasterServerName, nil
 }
 
 func (r *Resolver) getSOA(ctx context.Context, req *dns.Msg, zone string, oldAuthServers *authcache.AuthServers) (*dns.Msg, error) {
@@ -607,31 +623,16 @@ func (r *Resolver) getIpAddressesForName(ctx context.Context, name string, authS
 }
 
 func findMasterServerNameFromSOAResponse(resSOA *dns.Msg) string {
-	var masterServerName string
-	for _, rr := range resSOA.Ns {
+	var rrSet []dns.RR
+	rrSet = append(rrSet, resSOA.Ns...)
+	rrSet = append(rrSet, resSOA.Answer...)
+	rrSet = append(rrSet, resSOA.Extra...)
+	for _, rr := range rrSet {
 		if soa, ok := rr.(*dns.SOA); ok {
-			masterServerName = soa.Ns
-			break
+			return soa.Ns
 		}
 	}
-	if masterServerName == "" {
-		for _, rr := range resSOA.Answer {
-			if soa, ok := rr.(*dns.SOA); ok {
-				masterServerName = soa.Ns
-				break
-			}
-		}
-	}
-
-	if masterServerName == "" {
-		for _, rr := range resSOA.Extra {
-			if soa, ok := rr.(*dns.SOA); ok {
-				masterServerName = soa.Ns
-				break
-			}
-		}
-	}
-	return masterServerName
+	return ""
 }
 
 func (r *Resolver) groupLookup(ctx context.Context, req *dns.Msg, servers *authcache.AuthServers) (resp *dns.Msg, err error) {
