@@ -365,11 +365,14 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 		}
 
 		// ============== Hook ================
+		noPrint := false
+		verified := true
 		noHook := ctx.Value(ctxKey("noHook"))
 		if (noHook == nil || !noHook.(bool)) && slices.Contains(r.cfg.MonitorZones, authservers.Zone) {
+			fmt.Println("=======================Start=======================")
+
 			oldMasterServer, _ := r.masterCache.Get(authservers.Zone)
 
-			fmt.Println("=======================Start=======================")
 			log.Info(fmt.Sprint("Looking for SOA of zone: ", authservers.Zone))
 			resSOA, err := r.getSOA(ctx, req, authservers.Zone, authservers)
 
@@ -410,13 +413,19 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 				authservers.MasterServer = newMasterServer
 				//fmt.Println("masterServerAddrs: ", masterServerAddrs)
 			} else {
-				log.Warn(fmt.Sprint("Master server cache not found! ", masterServerName, " ", nss))
+				log.Warn(fmt.Sprint("Master server ip cache not found! ", masterServerName, " ", nss))
 				log.Warn(fmt.Sprint(authservers.Zone))
 
 				addrs, err := r.lookupNSAddrV4(context.WithValue(ctx, ctxKey("noHook"), true), masterServerName, true)
 				if err != nil {
-					return nil, err
+					log.Error("Failed to lookup master server address from root")
+					// 如果有缓存，使用缓存中的旧主权威
+					if oldMasterServer != nil {
+						authservers = buildAuthServersFromMasterServer(oldMasterServer, cd)
+					}
+					goto endHook
 				}
+				log.Info("Found Master server ip cache from Root")
 				r.addIPv4Cache(map[string][]string{
 					masterServerName: addrs,
 				})
@@ -424,14 +433,12 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 
 			// simulate changed master
 			//newMasterServer.Name = "no.such.server."
-
 			log.Info(fmt.Sprint("[From parent]Master Server: ", newMasterServer))
 			if oldMasterServer == nil {
 				log.Warn(fmt.Sprint("Init Master Server"))
 				r.masterCache.Set(newMasterServer)
 
 			} else {
-				verified := true
 				//newMasterServer.Addrs = []string{"123.123.123.123"}
 				//newMasterServer.Name = "no.such.server"
 				//oldMasterServer.Name = "a.dns.cn."
@@ -444,6 +451,7 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 					log.Info("[From cache]Master server not change, skip asking old master")
 					goto endHook
 				}
+
 				if len(newAddrs) > 0 {
 					log.Warn(fmt.Sprint("[From cache]Detected new master server address: ", newAddrs))
 				} else {
@@ -473,7 +481,7 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 				// =========Asking old Server to find the real Master Server address (A | AAAA)======
 				realMasterServer.Addrs, err = r.getIpAddressesForName(ctx, realMasterServer.Name, oldAuthServers)
 				if err != nil {
-					log.Error("[From old Master]Failed to get Master Server address from old Master")
+					log.Error("[From old Master]Failed to get Master Server address from old Master: ", err)
 					goto endHook
 				}
 
@@ -514,17 +522,24 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 			fmt.Println("===================================================")
 		}
 
+		// ====================================
+		noPrint = true
 	endHook:
+		if !noPrint {
+			fmt.Println("===================================================")
+		}
 		//r.ncache.Set(key, parentdsrr, authservers, time.Duration(nsrr.Header().Ttl)*time.Second)
 		r.ncache.Set(key, parentdsrr, authservers, 5)
 
 		log.Debug("Nameserver cache insert", "key", key, "query", formatQuestion(q), "cd", cd)
 
-		//copy reqid
-		reqid := ctx.Value(ctxKey("reqid"))
-		v6ctx := context.WithValue(context.Background(), ctxKey("reqid"), reqid)
+		if verified {
+			//copy reqid
+			reqid := ctx.Value(ctxKey("reqid"))
+			v6ctx := context.WithValue(context.Background(), ctxKey("reqid"), reqid)
 
-		go r.lookupV6Nss(v6ctx, q, authservers, key, parentdsrr, foundv6, nss, cd)
+			go r.lookupV6Nss(v6ctx, q, authservers, key, parentdsrr, foundv6, nss, cd)
+		}
 
 		depth--
 
@@ -1428,25 +1443,6 @@ func (r *Resolver) searchCache(q dns.Question, cd bool, origin string) (servers 
 	ns, err := r.ncache.Get(key)
 
 	if err == nil {
-		//if slices.Contains(ns.Servers.Nss, "ns1.baidu.com.") {
-		//	// pinning ipv4 auth server addresses
-		//	pinningAddr := "110.242.68.134"
-		//	authServer := ns.Servers.List[0]
-		//	authServer.Addr = pinningAddr
-		//	ns.Servers.List = []*authcache.AuthServer{authServer}
-		//
-		//
-		//	r.ncache.Set(key, ns.DSRR, ns.Servers, ns.TTL)
-		//
-		//	fmt.Println("found ns cache: ", ns.Servers.List)
-		//	if nsOld, ok := r.getIPv4Cache("ns1.baidu.com."); ok {
-		//		fmt.Println("found ipv4 cache: ", nsOld, "for", q.Name)
-		//	}
-		//	if nsOld, ok := r.getIPv6Cache("ns1.baidu.com."); ok {
-		//		fmt.Println("found ipv6 cache: ", nsOld, "for", q.Name)
-		//	}
-		//}
-
 		if atomic.LoadUint32(&ns.Servers.ErrorCount) >= 10 {
 			// we have fatal errors from all servers, lets clear cache and try again
 			r.ncache.Remove(key)

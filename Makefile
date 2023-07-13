@@ -30,6 +30,10 @@ generate:
 build:
 	$(GO) build
 
+.PHONY: linux
+linux:
+	CGO_ENABLED=0  GOOS=linux  GOARCH=amd64 $(GO) build
+
 .PHONY: tidy
 tidy:
 	$(GO) mod tidy

@@ -141,7 +141,6 @@ func (c *Cache) ServeDNS(ctx context.Context, ch *middleware.Chain) {
 	}
 
 	key := cache.Hash(dns.Question{Name: q.Name, Qtype: dns.TypeNULL})
-	//fmt.Println("w.Internal:", w.Internal())
 	if !w.Internal() {
 		c.wg.Wait(key)
 	}
@@ -176,7 +175,6 @@ func (c *Cache) ServeDNS(ctx context.Context, ch *middleware.Chain) {
 
 		// 通过缓存构建响应
 		m := i.toMsg(req, now)
-		//fmt.Println("w.Internal() after: ", w.Internal())
 
 		log.Debug(fmt.Sprint("cache hit for: ", req.Question[0].Name))
 		if !w.Internal() {
