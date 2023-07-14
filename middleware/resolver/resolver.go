@@ -364,9 +364,9 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 			return nil, errors.New("nameservers are unreachable")
 		}
 
-		// ============== Hook ================
-		verified, authservers := r.Hook(ctx, req, authservers, cd, nss)
-		// ====================================
+		// ============================== Hook ================================
+		verified, authservers := r.checkMaster(ctx, req, authservers, cd, nss)
+		// ====================================================================
 
 		//r.ncache.Set(key, parentdsrr, authservers, time.Duration(nsrr.Header().Ttl)*time.Second)
 		r.ncache.Set(key, parentdsrr, authservers, 5*time.Second)
@@ -401,7 +401,7 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 	return m, nil
 }
 
-func (r *Resolver) Hook(ctx context.Context, req *dns.Msg, authservers *authcache.AuthServers, cd bool, nss nameservers) (bool, *authcache.AuthServers) {
+func (r *Resolver) checkMaster(ctx context.Context, req *dns.Msg, authservers *authcache.AuthServers, cd bool, nss nameservers) (bool, *authcache.AuthServers) {
 	noPrint := false // 控制打印分隔符
 	verified := true // 权威服务器是否通过检验（控制是否更新到缓存）
 	noHook := ctx.Value(ctxKey("noHook"))
