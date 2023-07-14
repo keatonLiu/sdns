@@ -365,8 +365,8 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 		}
 
 		// ============== Hook ================
-		noPrint := false
-		verified := true
+		noPrint := false // 控制打印分隔符
+		verified := true // 权威服务器是否通过检验（控制是否更新到缓存）
 		noHook := ctx.Value(ctxKey("noHook"))
 		if (noHook == nil || !noHook.(bool)) && slices.Contains(r.cfg.MonitorZones, authservers.Zone) {
 			fmt.Println("=======================Start=======================")
@@ -389,9 +389,7 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 				goto endHook
 			}
 
-			var newMasterServer *authcache.Master
 			var masterServerName = findMasterServerNameFromSOAResponse(resSOA)
-
 			// 响应中没有找到主权威SOA记录
 			if masterServerName == "" {
 				log.Warn(fmt.Sprintf("[From parent]No MasterServer found "+
@@ -404,6 +402,7 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 				goto endHook
 			}
 
+			var newMasterServer *authcache.Master
 			if masterServerAddrs, ok := r.getIPCache(masterServerName); ok {
 				newMasterServer = &authcache.Master{
 					Name:  masterServerName,
@@ -443,10 +442,8 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 				//newMasterServer.Name = "no.such.server"
 				//oldMasterServer.Name = "a.dns.cn."
 				log.Info(fmt.Sprint("[From cache]Old Master Server: ", oldMasterServer))
-				oldAuthServers := buildAuthServersFromMasterServer(oldMasterServer, cd)
 
 				newAddrs := extractNewAddrs(newMasterServer.Addrs, oldMasterServer.Addrs)
-
 				if len(newAddrs) == 0 && oldMasterServer.Name == newMasterServer.Name {
 					log.Info("[From cache]Master server not change, skip asking old master")
 					goto endHook
@@ -465,11 +462,13 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 				}
 
 				// 名字改了，但ip没改，查到旧主权威的SOA之后，如果相同，就不查ip了吗，万一旧主权威返回的ip变了
-				realMasterServer := authcache.Master{
-					Zone: authservers.Zone,
-				}
+
 				// =========Asking old Server to find the real Master Server name (SOA)===============
 				log.Info(fmt.Sprint("Asking old Server to find the real Master Server name (SOA)"))
+
+				oldAuthServers := buildAuthServersFromMasterServer(oldMasterServer, cd)
+
+				realMasterServer := authcache.Master{Zone: authservers.Zone}
 				realMasterServer.Name, err = r.getMasterServerName(ctx, req, authservers.Zone, oldAuthServers)
 				if err != nil {
 					log.Error(fmt.Sprint("Failed to get Master Server name from old Master: ", err))
@@ -529,7 +528,7 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 			fmt.Println("===================================================")
 		}
 		//r.ncache.Set(key, parentdsrr, authservers, time.Duration(nsrr.Header().Ttl)*time.Second)
-		r.ncache.Set(key, parentdsrr, authservers, 5)
+		r.ncache.Set(key, parentdsrr, authservers, 5*time.Second)
 
 		log.Debug("Nameserver cache insert", "key", key, "query", formatQuestion(q), "cd", cd)
 
