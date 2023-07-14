@@ -365,168 +365,9 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 		}
 
 		// ============== Hook ================
-		noPrint := false // 控制打印分隔符
-		verified := true // 权威服务器是否通过检验（控制是否更新到缓存）
-		noHook := ctx.Value(ctxKey("noHook"))
-		if (noHook == nil || !noHook.(bool)) && slices.Contains(r.cfg.MonitorZones, authservers.Zone) {
-			fmt.Println("=======================Start=======================")
-
-			oldMasterServer, _ := r.masterCache.Get(authservers.Zone)
-
-			log.Info(fmt.Sprint("Looking for SOA of zone: ", authservers.Zone))
-			resSOA, err := r.getSOA(ctx, req, authservers.Zone, authservers)
-
-			if err != nil {
-				log.Error(fmt.Sprint("Res SOA resolve failed for zone: ", authservers.Zone,
-					" using authServers: ", authservers.List))
-
-				log.Warn(fmt.Sprintf("No MasterServer found for zone: %v", authservers.Zone))
-				// 如果有缓存，使用缓存中的旧主权威
-				if oldMasterServer != nil {
-					authservers = buildAuthServersFromMasterServer(oldMasterServer, cd)
-				}
-				// 否则只能正常返回
-				goto endHook
-			}
-
-			var masterServerName = findMasterServerNameFromSOAResponse(resSOA)
-			// 响应中没有找到主权威SOA记录
-			if masterServerName == "" {
-				log.Warn(fmt.Sprintf("[From parent]No MasterServer found "+
-					"for zone: %v", authservers.Zone))
-				// 如果有缓存，使用缓存中的旧主权威
-				if oldMasterServer != nil {
-					authservers = buildAuthServersFromMasterServer(oldMasterServer, cd)
-				}
-				// 否则只能正常返回
-				goto endHook
-			}
-
-			var newMasterServer *authcache.Master
-			if masterServerAddrs, ok := r.getIPCache(masterServerName); ok {
-				newMasterServer = &authcache.Master{
-					Name:  masterServerName,
-					Addrs: masterServerAddrs,
-					Zone:  authservers.Zone,
-				}
-				authservers.MasterServer = newMasterServer
-				//fmt.Println("masterServerAddrs: ", masterServerAddrs)
-			} else {
-				log.Warn(fmt.Sprint("Master server ip cache not found! ", masterServerName, " ", nss))
-				log.Warn(fmt.Sprint(authservers.Zone))
-
-				addrs, err := r.lookupNSAddrV4(context.WithValue(ctx, ctxKey("noHook"), true), masterServerName, true)
-				if err != nil {
-					log.Error("Failed to lookup master server address from root")
-					// 如果有缓存，使用缓存中的旧主权威
-					if oldMasterServer != nil {
-						authservers = buildAuthServersFromMasterServer(oldMasterServer, cd)
-					}
-					goto endHook
-				}
-				log.Info("Found Master server ip cache from Root")
-				r.addIPv4Cache(map[string][]string{
-					masterServerName: addrs,
-				})
-			}
-
-			// simulate changed master
-			//newMasterServer.Name = "no.such.server."
-			log.Info(fmt.Sprint("[From parent]Master Server: ", newMasterServer))
-			if oldMasterServer == nil {
-				log.Warn(fmt.Sprint("Init Master Server"))
-				r.masterCache.Set(newMasterServer)
-
-			} else {
-				//newMasterServer.Addrs = []string{"123.123.123.123"}
-				//newMasterServer.Name = "no.such.server"
-				//oldMasterServer.Name = "a.dns.cn."
-				log.Info(fmt.Sprint("[From cache]Old Master Server: ", oldMasterServer))
-
-				newAddrs := extractNewAddrs(newMasterServer.Addrs, oldMasterServer.Addrs)
-				if len(newAddrs) == 0 && oldMasterServer.Name == newMasterServer.Name {
-					log.Info("[From cache]Master server not change, skip asking old master")
-					goto endHook
-				}
-
-				if len(newAddrs) > 0 {
-					log.Warn(fmt.Sprint("[From cache]Detected new master server address: ", newAddrs))
-				} else {
-					log.Info("[From cache]Master Server address not change!")
-				}
-				if oldMasterServer.Name != newMasterServer.Name {
-					log.Warn(fmt.Sprint("[From cache]Master Server name changed! ",
-						oldMasterServer.Name, " ==> ", newMasterServer.Name))
-				} else {
-					log.Info("[From cache]Master Server name not change!")
-				}
-
-				// 名字改了，但ip没改，查到旧主权威的SOA之后，如果相同，就不查ip了吗，万一旧主权威返回的ip变了
-
-				// =========Asking old Server to find the real Master Server name (SOA)===============
-				log.Info(fmt.Sprint("Asking old Server to find the real Master Server name (SOA)"))
-
-				oldAuthServers := buildAuthServersFromMasterServer(oldMasterServer, cd)
-
-				realMasterServer := authcache.Master{Zone: authservers.Zone}
-				realMasterServer.Name, err = r.getMasterServerName(ctx, req, authservers.Zone, oldAuthServers)
-				if err != nil {
-					log.Error(fmt.Sprint("Failed to get Master Server name from old Master: ", err))
-					goto endHook
-				} else {
-					log.Info(fmt.Sprint("[From old Master]Real Master Server name: ", realMasterServer.Name))
-				}
-
-				// =========Asking old Server to find the real Master Server address (A | AAAA)======
-				realMasterServer.Addrs, err = r.getIpAddressesForName(ctx, realMasterServer.Name, oldAuthServers)
-				if err != nil {
-					log.Error("[From old Master]Failed to get Master Server address from old Master: ", err)
-					goto endHook
-				}
-
-				if len(realMasterServer.Addrs) > 0 {
-					log.Info(fmt.Sprint("[From old Master]Real Master Server ips: ", realMasterServer.Addrs))
-				} else {
-					log.Error(fmt.Sprintf("[From old Master]Real Master Server ips for %v Not found!",
-						oldMasterServer.Name))
-				}
-
-				// 检测到新的主权威IP地址
-				newIpsComparedToOldMaster := extractNewAddrs(newMasterServer.Addrs, realMasterServer.Addrs)
-				if len(newIpsComparedToOldMaster) > 0 {
-					log.Warn(fmt.Sprint("[Old Master check]Detected new master server address: ",
-						newIpsComparedToOldMaster))
-					verified = false
-				} else {
-					log.Info(fmt.Sprint("[From old Master]Same Master Server address!"))
-				}
-
-				// 检测到新的主权威名
-				if realMasterServer.Name != newMasterServer.Name {
-					log.Warn(fmt.Sprint("[From old Master]Master Server name changed! ",
-						oldMasterServer.Name, " ==> ", newMasterServer.Name))
-					verified = false
-				} else {
-					log.Info(fmt.Sprint("[From old Master]Same Master Server name!"))
-				}
-
-				if verified {
-					log.Warn("Save new master server to cache")
-					r.masterCache.Set(newMasterServer)
-				} else {
-					// Change authservers to the old master server
-					authservers = oldAuthServers
-				}
-			}
-			fmt.Println("===================================================")
-		}
-
+		verified, authservers := r.Hook(ctx, req, authservers, cd, nss)
 		// ====================================
-		noPrint = true
-	endHook:
-		if !noPrint {
-			fmt.Println("===================================================")
-		}
+
 		//r.ncache.Set(key, parentdsrr, authservers, time.Duration(nsrr.Header().Ttl)*time.Second)
 		r.ncache.Set(key, parentdsrr, authservers, 5*time.Second)
 
@@ -558,6 +399,171 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 	m.Extra = req.Extra
 
 	return m, nil
+}
+
+func (r *Resolver) Hook(ctx context.Context, req *dns.Msg, authservers *authcache.AuthServers, cd bool, nss nameservers) (bool, *authcache.AuthServers) {
+	noPrint := false // 控制打印分隔符
+	verified := true // 权威服务器是否通过检验（控制是否更新到缓存）
+	noHook := ctx.Value(ctxKey("noHook"))
+	if (noHook == nil || !noHook.(bool)) && slices.Contains(r.cfg.MonitorZones, authservers.Zone) {
+		fmt.Println("=======================Start=======================")
+
+		oldMasterServer, _ := r.masterCache.Get(authservers.Zone)
+
+		log.Info(fmt.Sprint("Looking for SOA of zone: ", authservers.Zone))
+		resSOA, err := r.getSOA(ctx, req, authservers.Zone, authservers)
+
+		if err != nil {
+			log.Error(fmt.Sprint("Res SOA resolve failed for zone: ", authservers.Zone,
+				" using authServers: ", authservers.List))
+
+			log.Warn(fmt.Sprintf("No MasterServer found for zone: %v", authservers.Zone))
+			// 如果有缓存，使用缓存中的旧主权威
+			if oldMasterServer != nil {
+				authservers = buildAuthServersFromMasterServer(oldMasterServer, cd)
+			}
+			// 否则只能正常返回
+			goto endHook
+		}
+
+		var masterServerName = findMasterServerNameFromSOAResponse(resSOA)
+		// 响应中没有找到主权威SOA记录
+		if masterServerName == "" {
+			log.Warn(fmt.Sprintf("[From parent]No MasterServer found "+
+				"for zone: %v", authservers.Zone))
+			// 如果有缓存，使用缓存中的旧主权威
+			if oldMasterServer != nil {
+				authservers = buildAuthServersFromMasterServer(oldMasterServer, cd)
+			}
+			// 否则只能正常返回
+			goto endHook
+		}
+
+		var newMasterServer *authcache.Master
+		if masterServerAddrs, ok := r.getIPCache(masterServerName); ok {
+			newMasterServer = &authcache.Master{
+				Name:  masterServerName,
+				Addrs: masterServerAddrs,
+				Zone:  authservers.Zone,
+			}
+			authservers.MasterServer = newMasterServer
+			//fmt.Println("masterServerAddrs: ", masterServerAddrs)
+		} else {
+			log.Warn(fmt.Sprint("Master server ip cache not found! ", masterServerName, " ", nss))
+			log.Warn(fmt.Sprint(authservers.Zone))
+
+			addrs, err := r.lookupNSAddrV4(context.WithValue(ctx, ctxKey("noHook"), true), masterServerName, true)
+			if err != nil {
+				log.Error("Failed to lookup master server address from root")
+				// 如果有缓存，使用缓存中的旧主权威
+				if oldMasterServer != nil {
+					authservers = buildAuthServersFromMasterServer(oldMasterServer, cd)
+				}
+				goto endHook
+			}
+			log.Info("Found Master server ip cache from Root")
+			r.addIPv4Cache(map[string][]string{
+				masterServerName: addrs,
+			})
+		}
+
+		// simulate changed master
+		//newMasterServer.Name = "no.such.server."
+		log.Info(fmt.Sprint("[From parent]Master Server: ", newMasterServer))
+		if oldMasterServer == nil {
+			log.Warn(fmt.Sprint("Init Master Server"))
+			r.masterCache.Set(newMasterServer)
+
+		} else {
+			//newMasterServer.Addrs = []string{"123.123.123.123"}
+			//newMasterServer.Name = "no.such.server"
+			//oldMasterServer.Name = "a.dns.cn."
+			log.Info(fmt.Sprint("[From cache]Old Master Server: ", oldMasterServer))
+
+			newAddrs := extractNewAddrs(newMasterServer.Addrs, oldMasterServer.Addrs)
+			if len(newAddrs) == 0 && oldMasterServer.Name == newMasterServer.Name {
+				log.Info("[From cache]Master server not change, skip asking old master")
+				goto endHook
+			}
+
+			if len(newAddrs) > 0 {
+				log.Warn(fmt.Sprint("[From cache]Detected new master server address: ", newAddrs))
+			} else {
+				log.Info("[From cache]Master Server address not change!")
+			}
+			if oldMasterServer.Name != newMasterServer.Name {
+				log.Warn(fmt.Sprint("[From cache]Master Server name changed! ",
+					oldMasterServer.Name, " ==> ", newMasterServer.Name))
+			} else {
+				log.Info("[From cache]Master Server name not change!")
+			}
+
+			// 名字改了，但ip没改，查到旧主权威的SOA之后，如果相同，就不查ip了吗，万一旧主权威返回的ip变了
+
+			// =========Asking old Server to find the real Master Server name (SOA)===============
+			log.Info(fmt.Sprint("Asking old Server to find the real Master Server name (SOA)"))
+
+			oldAuthServers := buildAuthServersFromMasterServer(oldMasterServer, cd)
+
+			realMasterServer := authcache.Master{Zone: authservers.Zone}
+			realMasterServer.Name, err = r.getMasterServerName(ctx, req, authservers.Zone, oldAuthServers)
+			if err != nil {
+				log.Error(fmt.Sprint("Failed to get Master Server name from old Master: ", err))
+				goto endHook
+			} else {
+				log.Info(fmt.Sprint("[From old Master]Real Master Server name: ", realMasterServer.Name))
+			}
+
+			// =========Asking old Server to find the real Master Server address (A | AAAA)======
+			realMasterServer.Addrs, err = r.getIpAddressesForName(ctx, realMasterServer.Name, oldAuthServers)
+			if err != nil {
+				log.Error("[From old Master]Failed to get Master Server address from old Master: ", err)
+				goto endHook
+			}
+
+			if len(realMasterServer.Addrs) > 0 {
+				log.Info(fmt.Sprint("[From old Master]Real Master Server ips: ", realMasterServer.Addrs))
+			} else {
+				log.Error(fmt.Sprintf("[From old Master]Real Master Server ips for %v Not found!",
+					oldMasterServer.Name))
+			}
+
+			// 检测到新的主权威IP地址
+			newIpsComparedToOldMaster := extractNewAddrs(newMasterServer.Addrs, realMasterServer.Addrs)
+			if len(newIpsComparedToOldMaster) > 0 {
+				log.Warn(fmt.Sprint("[Old Master check]Detected new master server address: ",
+					newIpsComparedToOldMaster))
+				verified = false
+			} else {
+				log.Info(fmt.Sprint("[From old Master]Same Master Server address!"))
+			}
+
+			// 检测到新的主权威名
+			if realMasterServer.Name != newMasterServer.Name {
+				log.Warn(fmt.Sprint("[From old Master]Master Server name changed! ",
+					oldMasterServer.Name, " ==> ", newMasterServer.Name))
+				verified = false
+			} else {
+				log.Info(fmt.Sprint("[From old Master]Same Master Server name!"))
+			}
+
+			if verified {
+				log.Warn("Save new master server to cache")
+				r.masterCache.Set(newMasterServer)
+			} else {
+				// Change authservers to the old master server
+				authservers = oldAuthServers
+			}
+		}
+		fmt.Println("===================================================")
+	}
+
+	noPrint = true
+endHook:
+	if !noPrint {
+		fmt.Println("===================================================")
+	}
+	return verified, authservers
 }
 
 func buildAuthServersFromMasterServer(oldMasterServer *authcache.Master, cd bool) *authcache.AuthServers {
