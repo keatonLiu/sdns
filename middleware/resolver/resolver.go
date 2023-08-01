@@ -405,9 +405,9 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 }
 
 func (r *Resolver) checkMaster(ctx context.Context, req *dns.Msg, authservers *authcache.AuthServers, cd bool, nss nameservers) (bool, *authcache.AuthServers) {
-	verified := true                             // 权威服务器是否通过检验（控制是否更新到缓存）
-	noHook := ctx.Value(ctxKey("noHook")).(bool) // bool 默认值为 false
-	if !noHook && slices.Contains(r.cfg.MonitorZones, authservers.Zone) {
+	verified := true // 权威服务器是否通过检验（控制是否更新到缓存）
+	noHook := ctx.Value(ctxKey("noHook"))
+	if (noHook == nil || !noHook.(bool)) && slices.Contains(r.cfg.MonitorZones, authservers.Zone) {
 		fmt.Println("=======================Start=======================")
 
 		oldMasterServer, _ := r.masterCache.Get(authservers.Zone)
