@@ -83,6 +83,8 @@ func NewResolver(cfg *config.Config) *Resolver {
 	if r.cfg.Timeout.Duration > 0 {
 		r.netTimeout = r.cfg.Timeout.Duration
 	}
+
+	// 配置文件中zone名称转换为fqdn（完整域名）
 	for i, zone := range r.cfg.MonitorZones {
 		r.cfg.MonitorZones[i] = dns.Fqdn(zone)
 	}
@@ -197,7 +199,7 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 
 	// 没有缩小域名，说明收到了原域名的答案，直接返回结果
 	if !minimized && len(resp.Answer) > 0 {
-		// this is like auth server external cname error but this can be recover.
+		// this is like auth server external cname error but this can be recovered.
 		if resp.Rcode == dns.RcodeServerFailure && len(resp.Answer) > 0 {
 			resp.Rcode = dns.RcodeSuccess
 		}
@@ -402,10 +404,9 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 }
 
 func (r *Resolver) checkMaster(ctx context.Context, req *dns.Msg, authservers *authcache.AuthServers, cd bool, nss nameservers) (bool, *authcache.AuthServers) {
-	noPrint := false // 控制打印分隔符
-	verified := true // 权威服务器是否通过检验（控制是否更新到缓存）
-	noHook := ctx.Value(ctxKey("noHook"))
-	if (noHook == nil || !noHook.(bool)) && slices.Contains(r.cfg.MonitorZones, authservers.Zone) {
+	verified := true                             // 权威服务器是否通过检验（控制是否更新到缓存）
+	noHook := ctx.Value(ctxKey("noHook")).(bool) // bool 默认值为 false
+	if !noHook && slices.Contains(r.cfg.MonitorZones, authservers.Zone) {
 		fmt.Println("=======================Start=======================")
 
 		oldMasterServer, _ := r.masterCache.Get(authservers.Zone)
@@ -555,14 +556,12 @@ func (r *Resolver) checkMaster(ctx context.Context, req *dns.Msg, authservers *a
 				authservers = oldAuthServers
 			}
 		}
-		fmt.Println("===================================================")
+	} else {
+		return verified, authservers
 	}
 
-	noPrint = true
 endHook:
-	if !noPrint {
-		fmt.Println("===================================================")
-	}
+	fmt.Println("===================================================")
 	return verified, authservers
 }
 
