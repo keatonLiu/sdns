@@ -44,13 +44,8 @@ func (w *responseWriter) Reset(rw dns.ResponseWriter) {
 	w.msg = nil
 	w.rcode = dns.RcodeSuccess
 
-<<<<<<< HEAD
-	switch writer.LocalAddr().(type) {
-	case *net.TCPAddr:
-=======
 	switch rw.LocalAddr().(type) {
-	case (*net.TCPAddr):
->>>>>>> refs/remotes/origin/master
+	case *net.TCPAddr:
 		w.proto = "tcp"
 		w.remoteip = w.RemoteAddr().(*net.TCPAddr).IP
 	case *net.UDPAddr:
@@ -59,9 +54,9 @@ func (w *responseWriter) Reset(rw dns.ResponseWriter) {
 	}
 
 	switch writer := rw.(type) {
-	case (*mock.Writer):
+	case *mock.Writer:
 		w.proto = writer.Proto()
-	case (*doq.ResponseWriter):
+	case *doq.ResponseWriter:
 		w.proto = "doq"
 	}
 
