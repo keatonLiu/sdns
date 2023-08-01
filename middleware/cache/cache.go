@@ -140,7 +140,12 @@ func (c *Cache) ServeDNS(ctx context.Context, ch *middleware.Chain) {
 		return
 	}
 
+<<<<<<< HEAD
 	key := cache.Hash(dns.Question{Name: q.Name, Qtype: dns.TypeNULL})
+=======
+	key := cache.Hash(dns.Question{Name: q.Name, Qtype: dns.TypeNULL, Qclass: dns.ClassINET})
+
+>>>>>>> refs/remotes/origin/master
 	if !w.Internal() {
 		c.wg.Wait(key)
 	}
@@ -169,7 +174,9 @@ func (c *Cache) ServeDNS(ctx context.Context, ch *middleware.Chain) {
 				i.prefetching = true
 				c.pcache.Add(key, i)
 				pr := req.Copy()
-				go dnsutil.ExchangeInternal(ctx, pr)
+				go func() {
+					_, _ = dnsutil.ExchangeInternal(ctx, pr)
+				}()
 			}
 		}
 

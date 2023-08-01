@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/rand"
 	"crypto/rsa"
@@ -114,8 +115,9 @@ func Test_start(t *testing.T) {
 	cfg.API = "127.0.0.1:23221"
 	cfg.BindTLS = "127.0.0.1:23222"
 	cfg.BindDOH = "127.0.0.1:23223"
+	cfg.BindDOQ = "127.0.0.1:23224"
 
-	run()
+	run(context.Background())
 	time.Sleep(2 * time.Second)
 
 	os.Remove(cert)
