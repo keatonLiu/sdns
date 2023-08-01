@@ -368,6 +368,7 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 		verified, authservers := r.checkMaster(ctx, req, authservers, cd, nss)
 		// ====================================================================
 
+		// If verified is false here, the authservers will be old master server
 		//r.ncache.Set(key, parentdsrr, authservers, time.Duration(nsrr.Header().Ttl)*time.Second)
 		r.ncache.Set(key, parentdsrr, authservers, 5*time.Second)
 
@@ -414,10 +415,10 @@ func (r *Resolver) checkMaster(ctx context.Context, req *dns.Msg, authservers *a
 		resSOA, err := r.getSOA(ctx, req, authservers.Zone, authservers)
 
 		if err != nil {
-			log.Error(fmt.Sprint("Res SOA resolve failed for zone: ", authservers.Zone,
+			log.Error(fmt.Sprint("Failed to find MasterServer, SOA resolve failed for zone: ", authservers.Zone,
 				" using authServers: ", authservers.List))
 
-			log.Warn(fmt.Sprintf("No MasterServer found for zone: %v", authservers.Zone))
+			//log.Warn(fmt.Sprintf("No MasterServer found for zone: %v", authservers.Zone))
 			// 如果有缓存，使用缓存中的旧主权威
 			if oldMasterServer != nil {
 				authservers = buildAuthServersFromMasterServer(oldMasterServer, cd)
@@ -439,15 +440,14 @@ func (r *Resolver) checkMaster(ctx context.Context, req *dns.Msg, authservers *a
 			goto endHook
 		}
 
-		var newMasterServer *authcache.Master
+		newMasterServer := &authcache.Master{
+			Name: masterServerName,
+			Zone: authservers.Zone,
+		}
+		authservers.MasterServer = newMasterServer
 		if masterServerAddrs, ok := r.getIPCache(masterServerName); ok {
-			newMasterServer = &authcache.Master{
-				Name:  masterServerName,
-				Addrs: masterServerAddrs,
-				Zone:  authservers.Zone,
-			}
-			authservers.MasterServer = newMasterServer
-			//fmt.Println("masterServerAddrs: ", masterServerAddrs)
+			newMasterServer.Addrs = masterServerAddrs
+
 		} else {
 			log.Warn(fmt.Sprint("Master server ip cache not found! ", masterServerName, " ", nss))
 			log.Warn(fmt.Sprint(authservers.Zone))
@@ -465,11 +465,11 @@ func (r *Resolver) checkMaster(ctx context.Context, req *dns.Msg, authservers *a
 			r.addIPv4Cache(map[string][]string{
 				masterServerName: addrs,
 			})
+			newMasterServer.Addrs = addrs
 		}
 
-		// simulate changed master
-		//newMasterServer.Name = "no.such.server."
 		log.Info(fmt.Sprint("[From parent]Master Server: ", newMasterServer))
+		// First time trust
 		if oldMasterServer == nil {
 			log.Warn(fmt.Sprint("Init Master Server"))
 			r.masterCache.Set(newMasterServer)
@@ -503,6 +503,7 @@ func (r *Resolver) checkMaster(ctx context.Context, req *dns.Msg, authservers *a
 			// =========Asking old Server to find the real Master Server name (SOA)===============
 			log.Info(fmt.Sprint("Asking old Server to find the real Master Server name (SOA)"))
 
+			// Build oldAuthServers, namely old master server
 			oldAuthServers := buildAuthServersFromMasterServer(oldMasterServer, cd)
 
 			realMasterServer := authcache.Master{Zone: authservers.Zone}
@@ -528,8 +529,8 @@ func (r *Resolver) checkMaster(ctx context.Context, req *dns.Msg, authservers *a
 					oldMasterServer.Name))
 			}
 
-			// 检测到新的主权威IP地址
 			newIpsComparedToOldMaster := extractNewAddrs(newMasterServer.Addrs, realMasterServer.Addrs)
+			// 检测到新的主权威IP地址
 			if len(newIpsComparedToOldMaster) > 0 {
 				log.Warn(fmt.Sprint("[Old Master check]Detected new master server address: ",
 					newIpsComparedToOldMaster))
