@@ -6,10 +6,13 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/miekg/dns"
 )
+
+const minMsgHeaderSize = 12
 
 // HandleWireFormat handle wire format
 func HandleWireFormat(handle func(*dns.Msg) *dns.Msg) func(http.ResponseWriter, *http.Request) {
@@ -43,6 +46,11 @@ func HandleWireFormat(handle func(*dns.Msg) *dns.Msg) func(http.ResponseWriter, 
 			return
 		}
 
+		if len(buf) < minMsgHeaderSize {
+			http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
+			return
+		}
+
 		req := new(dns.Msg)
 		if err := req.Unpack(buf); err != nil {
 			http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
@@ -61,8 +69,8 @@ func HandleWireFormat(handle func(*dns.Msg) *dns.Msg) func(http.ResponseWriter, 
 			return
 		}
 
-		w.Header().Set("Server", "SDNS")
 		w.Header().Set("Content-Type", "application/dns-message")
+		w.Header().Set("Content-Length", strconv.Itoa(len(packed)))
 
 		_, _ = w.Write(packed)
 	}
@@ -144,13 +152,13 @@ func HandleJSON(handle func(*dns.Msg) *dns.Msg) func(http.ResponseWriter, *http.
 			return
 		}
 
-		w.Header().Set("Server", "SDNS")
-
 		if strings.Contains(r.Header.Get("Accept"), "text/html") {
 			w.Header().Set("Content-Type", "application/x-javascript")
 		} else {
 			w.Header().Set("Content-Type", "application/dns-json")
 		}
+
+		w.Header().Set("Content-Length", strconv.Itoa(len(json)))
 
 		_, _ = w.Write(json)
 	}

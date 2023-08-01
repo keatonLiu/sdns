@@ -1,4 +1,4 @@
-ARG image=golang:1.20.3-alpine3.17
+ARG image=golang:1.20.5-alpine3.18
 
 FROM $image AS builder
 
@@ -9,12 +9,12 @@ WORKDIR /go/src/github.com/semihalev/sdns
 RUN apk --no-cache add \
 	ca-certificates \
 	gcc \
+        binutils-gold \
 	git \
 	musl-dev
 
 RUN go build -ldflags "-linkmode external -extldflags -static -s -w" -o /tmp/sdns \
 	&& strip --strip-all /tmp/sdns
-
 
 FROM scratch
 

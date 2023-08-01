@@ -3,11 +3,14 @@ package main
 //go:generate go run gen.go
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
 	"os/signal"
-	"runtime"
+	"runtime/debug"
+	"syscall"
+	"time"
 
 	"github.com/semihalev/log"
 	"github.com/semihalev/sdns/api"
@@ -16,33 +19,37 @@ import (
 	"github.com/semihalev/sdns/server"
 )
 
-const version = "1.3.0"
+const version = "1.3.2"
 
 var (
-	flagcfgpath  = flag.String("config", "sdns.conf", "location of the config file, if config file not found, a config will generate")
-	flagprintver = flag.Bool("v", false, "show version information")
+	flagcfgpath  string
+	flagprintver bool
 
 	cfg *config.Config
 )
 
 func init() {
-	runtime.GOMAXPROCS(runtime.NumCPU())
+	flag.StringVar(&flagcfgpath, "config", "sdns.conf", "Location of the config file. If it doesn't exist, a new one will be generated.")
+	flag.StringVar(&flagcfgpath, "c", "sdns.conf", "Location of the config file. If it doesn't exist, a new one will be generated.")
+
+	flag.BoolVar(&flagprintver, "version", false, "Show the version of the program.")
+	flag.BoolVar(&flagprintver, "v", false, "Show the version of the program.")
 
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: %s [OPTIONS]\n\n", os.Args[0])
-		fmt.Fprintln(os.Stderr, "Options:")
-		flag.PrintDefaults()
-		fmt.Fprintln(os.Stderr, "")
-		fmt.Fprintln(os.Stderr, "Example:")
-		fmt.Fprintf(os.Stderr, "%s -config=sdns.conf\n", os.Args[0])
-		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintf(os.Stderr, "Usage:\n  sdns [OPTIONS]\n\n")
+		fmt.Fprintf(os.Stderr, "Options:\n")
+		fmt.Fprintf(os.Stderr, "  -c, --config PATH\tLocation of the config file. If it doesn't exist, a new one will be generated.\n")
+		fmt.Fprintf(os.Stderr, "  -v, --version\t\tShow the version of the program.\n")
+		fmt.Fprintf(os.Stderr, "  -h, --help\t\tShow this message and exit.\n\n")
+		fmt.Fprintf(os.Stderr, "Example:\n")
+		fmt.Fprintf(os.Stderr, "  sdns -c sdns.conf\n\n")
 	}
 }
 
 func setup() {
 	var err error
 
-	if cfg, err = config.Load(*flagcfgpath, version); err != nil {
+	if cfg, err = config.Load(flagcfgpath, version); err != nil {
 		log.Crit("Config loading failed", "error", err.Error())
 	}
 
@@ -60,31 +67,47 @@ func setup() {
 	middleware.Setup(cfg)
 }
 
-func run() {
-	server := server.New(cfg)
-	server.Run()
+func run(ctx context.Context) *server.Server {
+	srv := server.New(cfg)
+	srv.Run(ctx)
 
 	api := api.New(cfg)
-	api.Run()
+	api.Run(ctx)
+
+	return srv
 }
 
 func main() {
 	flag.Parse()
 
-	if *flagprintver {
-		println("SDNS v" + version)
+	if flagprintver {
+		buildInfo, _ := debug.ReadBuildInfo()
+		fmt.Fprintf(os.Stderr, "SDNS v%s built with %s\n", version, buildInfo.GoVersion)
 		os.Exit(0)
 	}
 
 	log.Info("Starting sdns...", "version", version)
 
 	setup()
-	run()
 
-	c := make(chan os.Signal, 1)
-	signal.Notify(c, os.Interrupt)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	srv := run(ctx)
 
-	<-c
+	<-ctx.Done()
 
 	log.Info("Stopping sdns...")
+
+	stop()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	for !srv.Stopped() {
+		select {
+		case <-time.After(100 * time.Millisecond):
+			continue
+		case <-ctx.Done():
+			return
+		}
+	}
 }

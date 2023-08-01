@@ -83,6 +83,8 @@ func NewResolver(cfg *config.Config) *Resolver {
 	if r.cfg.Timeout.Duration > 0 {
 		r.netTimeout = r.cfg.Timeout.Duration
 	}
+
+	// 配置文件中zone名称转换为fqdn（完整域名）
 	for i, zone := range r.cfg.MonitorZones {
 		r.cfg.MonitorZones[i] = dns.Fqdn(zone)
 	}
@@ -197,7 +199,7 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 
 	// 没有缩小域名，说明收到了原域名的答案，直接返回结果
 	if !minimized && len(resp.Answer) > 0 {
-		// this is like auth server external cname error but this can be recover.
+		// this is like auth server external cname error but this can be recovered.
 		if resp.Rcode == dns.RcodeServerFailure && len(resp.Answer) > 0 {
 			resp.Rcode = dns.RcodeSuccess
 		}
@@ -403,10 +405,9 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 }
 
 func (r *Resolver) checkMaster(ctx context.Context, req *dns.Msg, authservers *authcache.AuthServers, cd bool, nss nameservers) (bool, *authcache.AuthServers) {
-	noPrint := false // 控制打印分隔符
-	verified := true // 权威服务器是否通过检验（控制是否更新到缓存）
-	noHook := ctx.Value(ctxKey("noHook"))
-	if (noHook == nil || !noHook.(bool)) && slices.Contains(r.cfg.MonitorZones, authservers.Zone) {
+	verified := true                             // 权威服务器是否通过检验（控制是否更新到缓存）
+	noHook := ctx.Value(ctxKey("noHook")).(bool) // bool 默认值为 false
+	if !noHook && slices.Contains(r.cfg.MonitorZones, authservers.Zone) {
 		fmt.Println("=======================Start=======================")
 
 		oldMasterServer, _ := r.masterCache.Get(authservers.Zone)
@@ -556,14 +557,12 @@ func (r *Resolver) checkMaster(ctx context.Context, req *dns.Msg, authservers *a
 				authservers = oldAuthServers
 			}
 		}
-		fmt.Println("===================================================")
+	} else {
+		return verified, authservers
 	}
 
-	noPrint = true
 endHook:
-	if !noPrint {
-		fmt.Println("===================================================")
-	}
+	fmt.Println("===================================================")
 	return verified, authservers
 }
 
@@ -950,14 +949,13 @@ func (r *Resolver) checkGlueRR(resp *dns.Msg, nss nameservers, level int) (*auth
 
 func (r *Resolver) addIPv4Cache(nsipv4 map[string][]string) {
 	for name, addrs := range nsipv4 {
-		key := cache.Hash(dns.Question{Name: name, Qtype: dns.TypeA})
-
+		key := cache.Hash(dns.Question{Name: name, Qtype: dns.TypeA, Qclass: dns.ClassINET})
 		r.ipv4cache.Add(key, addrs)
 	}
 }
 
 func (r *Resolver) getIPv4Cache(name string) ([]string, bool) {
-	key := cache.Hash(dns.Question{Name: name, Qtype: dns.TypeA})
+	key := cache.Hash(dns.Question{Name: name, Qtype: dns.TypeA, Qclass: dns.ClassINET})
 	if v, ok := r.ipv4cache.Get(key); ok {
 		return v.([]string), ok
 	}
@@ -966,18 +964,18 @@ func (r *Resolver) getIPv4Cache(name string) ([]string, bool) {
 }
 
 func (r *Resolver) removeIPv4Cache(name string) {
-	r.ipv4cache.Remove(cache.Hash(dns.Question{Name: name, Qtype: dns.TypeA}))
+	r.ipv4cache.Remove(cache.Hash(dns.Question{Name: name, Qtype: dns.TypeA, Qclass: dns.ClassINET}))
 }
 
 func (r *Resolver) addIPv6Cache(nsipv6 map[string][]string) {
 	for name, addrs := range nsipv6 {
-		key := cache.Hash(dns.Question{Name: name, Qtype: dns.TypeAAAA})
+		key := cache.Hash(dns.Question{Name: name, Qtype: dns.TypeAAAA, Qclass: dns.ClassINET})
 		r.ipv6cache.Add(key, addrs)
 	}
 }
 
 func (r *Resolver) getIPv6Cache(name string) ([]string, bool) {
-	key := cache.Hash(dns.Question{Name: name, Qtype: dns.TypeAAAA})
+	key := cache.Hash(dns.Question{Name: name, Qtype: dns.TypeAAAA, Qclass: dns.ClassINET})
 	if v, ok := r.ipv6cache.Get(key); ok {
 		return v.([]string), ok
 	}
@@ -997,7 +995,7 @@ func (r *Resolver) getIPCache(name string) ([]string, bool) {
 }
 
 func (r *Resolver) removeIPv6Cache(name string) {
-	r.ipv6cache.Remove(cache.Hash(dns.Question{Name: name, Qtype: dns.TypeAAAA}))
+	r.ipv6cache.Remove(cache.Hash(dns.Question{Name: name, Qtype: dns.TypeAAAA, Qclass: dns.ClassINET}))
 }
 
 func (r *Resolver) minimize(req *dns.Msg, level int, nomin bool) (*dns.Msg, bool) {
@@ -1250,11 +1248,11 @@ func (r *Resolver) lookup(ctx context.Context, req *dns.Msg, servers *authcache.
 
 	left := len(serversList)
 
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 mainloop:
 	for index, server := range serversList {
-		ctx, cancel := context.WithCancel(ctx)
-		defer cancel()
-
 		go startRacer(ctx, req.CopyTo(AcquireMsg()), server)
 
 	fallbackloop:
@@ -1342,6 +1340,10 @@ mainloop:
 }
 
 func (r *Resolver) exchange(ctx context.Context, proto string, req *dns.Msg, server *authcache.AuthServer, retried int) (*dns.Msg, error) {
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+
 	q := req.Question[0]
 
 	var resp *dns.Msg
@@ -1481,7 +1483,6 @@ func (r *Resolver) searchCache(q dns.Question, cd bool, origin string) (servers 
 	}
 
 	q.Name = q.Name[next:]
-	level++
 
 	return r.searchCache(q, cd, origin)
 }

@@ -1,10 +1,10 @@
-server.crt
-server.key
+*.pem
+*.crt
+*.key
 sdns
 sdns.conf
-sdns_*
 coverage.out
-blist_data
+bl
 access.log
 vendor
 go_build_sdns_go
