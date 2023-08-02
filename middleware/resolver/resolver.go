@@ -431,8 +431,7 @@ func (r *Resolver) checkMaster(ctx context.Context, req *dns.Msg, authservers *a
 		var masterServerName = findMasterServerNameFromSOAResponse(resSOA)
 		// 响应中没有找到主权威SOA记录
 		if masterServerName == "" {
-			log.Warn(fmt.Sprintf("[From parent]No MasterServer found "+
-				"for zone: %v", authservers.Zone))
+			log.Warn(fmt.Sprintf("No MasterServer found for zone: %v", authservers.Zone))
 			// 如果有缓存，使用缓存中的旧主权威
 			if oldMasterServer != nil {
 				authservers = buildAuthServersFromMasterServer(oldMasterServer, cd)
@@ -450,59 +449,63 @@ func (r *Resolver) checkMaster(ctx context.Context, req *dns.Msg, authservers *a
 			newMasterServer.Addrs = masterServerAddrs
 
 		} else {
-			log.Warn(fmt.Sprint("Master server ip cache not found! ", masterServerName, " ", nss))
+			log.Warn(fmt.Sprint("Anchor authoritative ip cache not found! ", masterServerName, " ", nss))
 
 			addrs, err := r.lookupNSAddrV4(context.WithValue(ctx, ctxKey("noHook"), true), masterServerName, true)
 			if err != nil {
-				log.Error("Failed to lookup master server address from root")
+				log.Error("Failed to lookup Anchor authoritative address from root")
 				// 如果有缓存，使用缓存中的旧主权威
 				if oldMasterServer != nil {
 					authservers = buildAuthServersFromMasterServer(oldMasterServer, cd)
 				}
 				goto endHook
 			}
-			log.Info("Found Master server ip cache from Root")
+			log.Info("Found authoritative servers ips from Root")
 			r.addIPv4Cache(map[string][]string{
 				masterServerName: addrs,
 			})
 			newMasterServer.Addrs = addrs
 		}
 
-		//log.Info(fmt.Sprint("[From parent]Master Server: ", newMasterServer))
+		log.Info(fmt.Sprintf("Newly queried authoritative servers: %s: %s for zone: %s",
+			newMasterServer.Name, newMasterServer.Addrs, newMasterServer.Zone))
 		// First time trust
 		if oldMasterServer == nil {
-			log.Warn(fmt.Sprint("Init Master Server"))
+			log.Warn(fmt.Sprintf("Init Anchor authoritative: %s: %s for zone: %s",
+				newMasterServer.Name, newMasterServer.Addrs, newMasterServer.Zone))
 			r.masterCache.Set(newMasterServer)
 
 		} else {
 			//newMasterServer.Addrs = []string{"123.123.123.123"}
 			//newMasterServer.Name = "no.such.server"
 			//oldMasterServer.Name = "a.dns.cn."
-			log.Info(fmt.Sprintf("[From cache]Anchor authoritative Server: %s: %s",
+			log.Debug(fmt.Sprintf("Local Anchor authoritative Server: %s: %s",
 				oldMasterServer.Name, strings.Join(newMasterServer.Addrs, ",")))
 
 			newAddrs := extractNewAddrs(newMasterServer.Addrs, oldMasterServer.Addrs)
 			if len(newAddrs) == 0 && oldMasterServer.Name == newMasterServer.Name {
-				log.Info("[From cache]Master server not change, skip asking anchor authoritative")
+				log.Info("Authoritative servers not change, skip asking Anchor Authoritative Servers")
 				goto endHook
 			}
 
 			if len(newAddrs) > 0 {
-				//log.Warn(fmt.Sprint("[From cache]Detected new master server address: ", newAddrs))
+				log.Warn(fmt.Sprint("Authoritative servers addresses is inconsistent with Anchor Authoritative Servers, ",
+					oldMasterServer.Addrs, " ==> ", newMasterServer.Addrs))
 			} else {
-				log.Info("[From cache]Master Server address not change!")
+				log.Info("Authoritative servers addresses is consistent with Anchor Authoritative Servers")
 			}
+
 			if oldMasterServer.Name != newMasterServer.Name {
-				log.Warn(fmt.Sprint("[From cache]Master Server name changed! ",
+				log.Warn(fmt.Sprint("Newly queried Authoritative servers name is inconsistent with Anchor Authoritative Servers, ",
 					oldMasterServer.Name, " ==> ", newMasterServer.Name))
 			} else {
-				log.Info("[From cache]Master Server name not change!")
+				log.Info("Authoritative servers names is consistent with Anchor Authoritative Servers")
 			}
 
 			// 名字改了，但ip没改，查到旧主权威的SOA之后，如果相同，就不查ip了吗，万一旧主权威返回的ip变了
 
-			// =========Asking old Server to find the real Master Server name (SOA)===============
-			//log.Info(fmt.Sprint("Asking old Server to find the real Master Server name (SOA)"))
+			// =========Asking old Server to find the real Anchor authoritative name (SOA)===============
+			//log.Info(fmt.Sprint("Asking old Server to find the real Anchor authoritative name (SOA)"))
 
 			// Build oldAuthServers, namely anchor authoritative server
 			oldAuthServers := buildAuthServersFromMasterServer(oldMasterServer, cd)
@@ -510,54 +513,53 @@ func (r *Resolver) checkMaster(ctx context.Context, req *dns.Msg, authservers *a
 			realMasterServer := &authcache.Master{Zone: authservers.Zone}
 			realMasterServer.Name, err = r.getMasterServerName(ctx, req, authservers.Zone, oldAuthServers)
 			if err != nil {
-				log.Error(fmt.Sprint("Failed to get Master Server name from anchor authoritative: ", err))
+				log.Error(fmt.Sprint("Failed to get Authoritative servers names from Anchor Authoritative Servers: ", err))
 				goto endHook
 			} else {
-				//log.Info(fmt.Sprint("[From anchor authoritative]Real Master Server name: ", realMasterServer.Name))
+				log.Info(fmt.Sprint("Authoritative servers names from Anchor Authoritative Servers: ", realMasterServer.Name))
 			}
 
-			// =========Asking old Server to find the real Master Server address (A | AAAA)======
+			// =========Asking old Server to find the real Anchor authoritative address (A | AAAA)======
 			realMasterServer.Addrs, err = r.getIpAddressesForName(ctx, realMasterServer.Name, oldAuthServers)
 			if err != nil {
-				log.Error("[From anchor authoritative]Failed to get Master Server address from anchor authoritative: ", err)
+				log.Error("Failed to get authoritative addresses from Anchor Authoritative Servers: ", err)
 				goto endHook
 			}
 
 			if len(realMasterServer.Addrs) > 0 {
-				//log.Info(fmt.Sprint("[From anchor authoritative]Real Master Server ips: ", realMasterServer.Addrs))
+				log.Info(fmt.Sprint("Authoritative Servers ips from Anchor Authoritative Servers: ", realMasterServer.Addrs))
 			} else {
-				log.Error(fmt.Sprintf("[From anchor authoritative]Real Master Server ips for %v Not found!",
+				log.Error(fmt.Sprintf("Authoritative Servers ips for %s Not found from Anchor Authoritative Servers",
 					oldMasterServer.Name))
 			}
 
 			newIpsComparedToOldMaster := extractNewAddrs(newMasterServer.Addrs, realMasterServer.Addrs)
 			// 检测到新的主权威IP地址
 			if len(newIpsComparedToOldMaster) > 0 {
-				//log.Warn(fmt.Sprint("[From anchor authoritative]Detected new master server address: ",
-				//	newIpsComparedToOldMaster))
+				log.Warn(fmt.Sprint("Authoritative servers addresses is inconsistent with those from Anchor Authoritative Servers, ",
+					oldMasterServer.Addrs, " ==> ", newMasterServer.Addrs))
 				verified = false
 			} else {
-				//log.Info(fmt.Sprint("[From anchor authoritative]Same Master Server address!"))
+				log.Info(fmt.Sprint("Authoritative servers addresses is consistent with those from Anchor Authoritative Servers"))
 			}
 
 			// 检测到新的主权威名
 			if realMasterServer.Name != newMasterServer.Name {
-				log.Warn(fmt.Sprint("[From anchor authoritative]Master Server name changed! ",
+				log.Warn(fmt.Sprint("Authoritative Servers names is inconsistent with those from Anchor Authoritative Servers, ",
 					oldMasterServer.Name, " ==> ", newMasterServer.Name))
 				verified = false
 			} else {
-				log.Info(fmt.Sprint("[From anchor authoritative]Same Master Server name!"))
+				log.Info(fmt.Sprint("Authoritative servers names is consistent with those from Anchor Authoritative Servers"))
 			}
 
-			if oldMasterServer.Name != realMasterServer.Name {
-				log.Warn("Update master server to cache")
-				r.masterCache.Set(realMasterServer)
-			}
+			r.masterCache.Set(realMasterServer)
 
 			if !verified {
 				// Change authservers to the anchor authoritative server
-				log.Warn("[From anchor authoritative]Verify failed, change authservers to anchor authoritative server")
+				log.Warn(fmt.Sprintf("Zone: %s, error: NOT_SMOOTH_MIGRATION", authservers.Zone))
 				authservers = oldAuthServers
+			} else {
+				log.Info(fmt.Sprintf("Zone: %s, msg: SMOOTH_MIGRATION", authservers.Zone))
 			}
 		}
 	} else {
