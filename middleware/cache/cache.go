@@ -166,7 +166,6 @@ func (c *Cache) ServeDNS(ctx context.Context, ch *middleware.Chain) {
 			threshold := math.Ceil(float64(c.prefetch) / 100 * float64(i.origTTL))
 
 			if i.ttl(now) <= int(threshold) {
-				fmt.Println("prefetching")
 				i.prefetching = true
 				c.pcache.Add(key, i)
 				pr := req.Copy()
