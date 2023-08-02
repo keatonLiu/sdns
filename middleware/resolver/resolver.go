@@ -451,7 +451,6 @@ func (r *Resolver) checkMaster(ctx context.Context, req *dns.Msg, authservers *a
 
 		} else {
 			log.Warn(fmt.Sprint("Master server ip cache not found! ", masterServerName, " ", nss))
-			log.Warn(fmt.Sprint(authservers.Zone))
 
 			addrs, err := r.lookupNSAddrV4(context.WithValue(ctx, ctxKey("noHook"), true), masterServerName, true)
 			if err != nil {
@@ -507,7 +506,7 @@ func (r *Resolver) checkMaster(ctx context.Context, req *dns.Msg, authservers *a
 			// Build oldAuthServers, namely old master server
 			oldAuthServers := buildAuthServersFromMasterServer(oldMasterServer, cd)
 
-			realMasterServer := authcache.Master{Zone: authservers.Zone}
+			realMasterServer := &authcache.Master{Zone: authservers.Zone}
 			realMasterServer.Name, err = r.getMasterServerName(ctx, req, authservers.Zone, oldAuthServers)
 			if err != nil {
 				log.Error(fmt.Sprint("Failed to get Master Server name from old Master: ", err))
@@ -549,11 +548,12 @@ func (r *Resolver) checkMaster(ctx context.Context, req *dns.Msg, authservers *a
 				log.Info(fmt.Sprint("[From old Master]Same Master Server name!"))
 			}
 
-			if verified {
-				log.Warn("Save new master server to cache")
-				r.masterCache.Set(newMasterServer)
-			} else {
+			log.Warn("Save new master server to cache")
+			r.masterCache.Set(realMasterServer)
+
+			if !verified {
 				// Change authservers to the old master server
+				log.Warn("[From old Master] Verify failed, change authservers to old master server")
 				authservers = oldAuthServers
 			}
 		}
