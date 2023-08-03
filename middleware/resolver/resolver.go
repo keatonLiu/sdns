@@ -510,8 +510,8 @@ func (r *Resolver) checkMaster(ctx context.Context, req *dns.Msg, authservers *a
 			// Build oldAuthServers, namely Anchor authoritative server
 			oldAuthServers := buildAuthServersFromMasterServer(oldMasterServer, cd)
 
-			realMasterServer := &authcache.Master{Zone: authServers.Zone}
-			realMasterServer.Name, err = r.getMasterServerName(ctx, req, authServers.Zone, oldAuthServers)
+			realMasterServer := &authcache.Master{Zone: authservers.Zone}
+			realMasterServer.Name, err = r.getMasterServerName(ctx, req, authservers.Zone, oldAuthServers)
 			if err != nil {
 				log.Error(fmt.Sprint("Failed to get Authoritative Servers names from Anchor Authoritative Servers: ", err))
 				goto endHook
@@ -557,7 +557,7 @@ func (r *Resolver) checkMaster(ctx context.Context, req *dns.Msg, authservers *a
 			r.masterCache.Set(realMasterServer)
 
 			if !verified {
-				// Change authServers to the Anchor authoritative server
+				// Change authservers to the Anchor authoritative server
 				log.Warn(fmt.Sprintf("Zone: %s, error: NOT_SMOOTH_MIGRATION", authservers.Zone))
 				authservers = oldAuthServers
 			} else {
