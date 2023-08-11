@@ -35,7 +35,7 @@ type Resolver struct {
 	ipv4cache *cache.Cache
 	ipv6cache *cache.Cache
 
-	masterCache *authcache.MasterCache
+	anchorNsCache *authcache.AnchorNsCache
 
 	rootkeys []dns.RR
 
@@ -74,7 +74,7 @@ func NewResolver(cfg *config.Config) *Resolver {
 		ipv4cache: cache.New(defaultCacheSize),
 		ipv6cache: cache.New(defaultCacheSize),
 
-		masterCache: authcache.NewMasterCache(),
+		anchorNsCache: authcache.NewAnchorNsCache(),
 
 		qnameMinLevel: cfg.QnameMinLevel,
 		netTimeout:    defaultTimeout,
@@ -402,6 +402,33 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 	m.Extra = req.Extra
 
 	return m, nil
+}
+
+func (r *Resolver) checkAnchorNS(ctx context.Context, req *dns.Msg, ds []dns.DS, authservers *authcache.AuthServers, cd bool, nss nameservers) (bool, *authcache.AuthServers) {
+	verified := true // 权威服务器是否通过检验（控制是否更新到缓存）
+	noHook := ctx.Value(ctxKey("noHook"))
+	if (noHook == nil || !noHook.(bool)) && slices.Contains(r.cfg.MonitorZones, authservers.Zone) {
+		fmt.Println("=======================Start=======================")
+		anchorNss, err := r.anchorNsCache.Get(authservers.Zone)
+		// 信任锚缓存过期
+		if err != nil {
+			log.Error(err.Error())
+			return true, nil
+		}
+
+		// parse new AuthServers
+		var newAuthServers []authcache.AnchorNs
+		for _, ns := range authservers.Nss {
+			ipv4s, _ := r.getIPv4Cache(ns)
+			ipv6s, _ := r.getIPv6Cache(ns)
+			newAuthServers = append(newAuthServers, authcache.AnchorNs{
+				Name: ns,
+				A:    ipv4s,
+				AAAA: ipv6s,
+			})
+		}
+
+	}
 }
 
 func (r *Resolver) checkMaster(ctx context.Context, req *dns.Msg, authservers *authcache.AuthServers, cd bool, nss nameservers) (bool, *authcache.AuthServers) {

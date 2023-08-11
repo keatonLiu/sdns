@@ -23,44 +23,6 @@ type NSCache struct {
 	now func() time.Time
 }
 
-type Master struct {
-	Name  string
-	Zone  string
-	Addrs []string
-}
-
-type MasterCache struct {
-	cache *cache.Cache
-
-	now func() time.Time
-}
-
-// NewMasterCache return new cache
-func NewMasterCache() *MasterCache {
-	n := &MasterCache{
-		cache: cache.New(defaultCap),
-		now:   time.Now,
-	}
-
-	return n
-}
-
-func (n *MasterCache) Get(zone string) (*Master, error) {
-	key := cache.Hash(dns.Question{Name: zone, Qtype: dns.TypeA})
-	el, ok := n.cache.Get(key)
-
-	if !ok {
-		return nil, cache.ErrCacheNotFound
-	}
-
-	return el.(*Master), nil
-}
-
-func (n *MasterCache) Set(master *Master) {
-	key := cache.Hash(dns.Question{Name: master.Zone, Qtype: dns.TypeA})
-	n.cache.Add(key, master)
-}
-
 // NewNSCache return new cache
 func NewNSCache() *NSCache {
 	n := &NSCache{
@@ -88,15 +50,6 @@ func (n *NSCache) Get(key uint64) (*NS, error) {
 	}
 
 	return ns, nil
-}
-
-func (n *NSCache) GetWithExpired(key uint64) (*NS, bool) {
-	if el, ok := n.cache.Get(key); ok {
-		ns := el.(*NS)
-		return ns, true
-	} else {
-		return nil, false
-	}
 }
 
 // Set sets a keys value to a NS
