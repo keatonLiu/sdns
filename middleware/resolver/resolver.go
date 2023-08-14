@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"golang.org/x/exp/slices"
 	"net"
+	"reflect"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -404,31 +405,153 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 	return m, nil
 }
 
-func (r *Resolver) checkAnchorNS(ctx context.Context, req *dns.Msg, ds []dns.DS, authservers *authcache.AuthServers, cd bool, nss nameservers) (bool, *authcache.AuthServers) {
+func (r *Resolver) checkAnchorNS(ctx context.Context, ds []dns.RR, req *dns.Msg, authservers *authcache.AuthServers) (bool, *authcache.AuthServers) {
 	verified := true // 权威服务器是否通过检验（控制是否更新到缓存）
 	noHook := ctx.Value(ctxKey("noHook"))
 	if (noHook == nil || !noHook.(bool)) && slices.Contains(r.cfg.MonitorZones, authservers.Zone) {
 		fmt.Println("=======================Start=======================")
-		anchorNss, err := r.anchorNsCache.Get(authservers.Zone)
+		// parse new AuthServers
+		newNsSet := authcache.AnchorNsSet{
+			Zone: authservers.Zone,
+			DSRR: ds,
+		}
+		for _, ns := range authservers.Nss {
+			ips, _ := r.getIPCache(ns)
+			ipsAll := map[string]interface{}{}
+			for _, ip := range ips {
+				ipsAll[ip] = struct{}{}
+			}
+
+			newNsSet.Nss[ns] = authcache.AnchorNs{
+				Name: ns,
+				Ips:  ipsAll,
+			}
+		}
+
+		anchorNsSet, err := r.anchorNsCache.Get(authservers.Zone)
 		// 信任锚缓存过期
-		if err != nil {
-			log.Error(err.Error())
+		// TODO: auto update cache
+		if err == cache.ErrCacheNotFound {
+			// 首次信任
+			r.anchorNsCache.Set(newNsSet)
+		} else if err == cache.ErrCacheExpired {
+			// TODO: update cache
+			log.Error("Cache expired")
 			return true, nil
 		}
 
-		// parse new AuthServers
-		var newAuthServers []authcache.AnchorNs
-		for _, ns := range authservers.Nss {
-			ipv4s, _ := r.getIPv4Cache(ns)
-			ipv6s, _ := r.getIPv6Cache(ns)
-			newAuthServers = append(newAuthServers, authcache.AnchorNs{
-				Name: ns,
-				A:    ipv4s,
-				AAAA: ipv6s,
-			})
+		if anchorNsSet.Equal(newNsSet) {
+			log.Info("Newly queried NSs are consistent with anchor NSs")
+			goto endHook
 		}
 
+		// check diff
+		var newNames []string // 新增NS名
+		var absNames []string // 减少NS名
+		for name := range anchorNsSet.Nss {
+			if _, ok := newNsSet.Nss[name]; !ok {
+				absNames = append(absNames, name)
+			}
+		}
+
+		for name := range newNsSet.Nss {
+			if _, ok := anchorNsSet.Nss[name]; !ok {
+				newNames = append(newNames, name)
+			}
+		}
+
+		var msgList = make([]string, 0)
+		if len(newNames) > 0 {
+			var msg []string
+			for _, name := range newNames {
+				msg = append(msg, formatNs(newNsSet.Nss[name]))
+			}
+			msgList = append(msgList, "New Nss: "+strings.Join(msg, " "))
+		}
+
+		if len(absNames) > 0 {
+			var msg []string
+			for _, name := range absNames {
+				msg = append(msg, formatNs(anchorNsSet.Nss[name]))
+			}
+			msgList = append(msgList, "Absent Nss: "+strings.Join(msg, " "))
+		}
+
+		diffIps := map[string]*struct {
+			Name string
+			Src  *map[string]interface{}
+			Dst  *map[string]interface{}
+		}{}
+		for name, ns := range anchorNsSet.Nss {
+			diffIps[name] = &struct {
+				Name string
+				Src  *map[string]interface{}
+				Dst  *map[string]interface{}
+			}{Name: name}
+			diffIp := diffIps[name]
+			if ns2, ok := newNsSet.Nss[name]; ok {
+				if !reflect.DeepEqual(ns.Ips, ns2.Ips) {
+					diffIp.Src = &ns.Ips
+					diffIp.Dst = &ns2.Ips
+				}
+			}
+		}
+
+		if len(diffIps) > 0 {
+			msgList = append(msgList, "Modified Nss:")
+			for _, ip := range diffIps {
+				if ip.Dst != nil {
+					msgList = append(msgList, fmt.Sprintf("%s: %v ==> %v", ip.Name, ip.Src, ip.Dst))
+				}
+			}
+		}
+
+		anchorServers := convertAnchorNsSetToAuthServers(anchorNsSet, authservers.CheckingDisable)
+		// TODO: check anchor NS
+		NSres, err := r.Resolve(context.WithValue(ctx, ctxKey("noHook"), true),
+			req, anchorServers, false, 30, 0, true, nil)
+		realNss := authcache.AnchorNsSet{
+			Zone: authservers.Zone,
+			Nss:  map[string]authcache.AnchorNs{},
+			DSRR: ds, // 需要是真实的ds，如何获取？
+			TTL:  0,
+		}
+		for _, rr := range NSres.Answer {
+			rr.Header().Name
+		}
+
+		if !verified {
+			// Change authservers to the Anchor authoritative server
+			log.Warn(fmt.Sprintf("Zone: %s, error: NOT_SMOOTH_MIGRATION", authservers.Zone))
+			authservers = anchorServers
+		} else {
+			log.Info(fmt.Sprintf("Zone: %s, msg: SMOOTH_MIGRATION", authservers.Zone))
+		}
+
+		log.Warn(strings.Join(msgList, " "))
+	} else {
+		return verified, authservers
 	}
+endHook:
+	fmt.Println("===================================================")
+	return verified, authservers
+}
+
+func convertAnchorNsSetToAuthServers(anchorNsSet *authcache.AnchorNsSet, cd bool) *authcache.AuthServers {
+	oldAuthServers := &authcache.AuthServers{
+		Zone:            anchorNsSet.Zone,
+		List:            []*authcache.AuthServer{},
+		Nss:             []string{},
+		CheckingDisable: cd,
+	}
+	for name, ns := range anchorNsSet.Nss {
+		for ip := range ns.Ips {
+			oldAuthServers.List = append(oldAuthServers.List,
+				authcache.NewAuthServer(ip, authcache.GetVersion(ip)))
+		}
+		oldAuthServers.Nss = append(oldAuthServers.Nss, name)
+	}
+	return oldAuthServers
 }
 
 func (r *Resolver) checkMaster(ctx context.Context, req *dns.Msg, authservers *authcache.AuthServers, cd bool, nss nameservers) (bool, *authcache.AuthServers) {
@@ -614,6 +737,10 @@ func buildAuthServersFromMasterServer(oldMasterServer *authcache.Master, cd bool
 			authcache.NewAuthServer(net.JoinHostPort(addr, "53"), authcache.GetVersion(addr)))
 	}
 	return oldAuthServers
+}
+
+func formatNs(ns authcache.AnchorNs) string {
+	return fmt.Sprintf("%s: %v", ns.Name, ns.Ips)
 }
 
 func (r *Resolver) getMasterServerName(ctx context.Context, req *dns.Msg, zone string, oldAuthServers *authcache.AuthServers) (string, error) {
