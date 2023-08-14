@@ -46,7 +46,7 @@ func NewAnchorNsCache() *AnchorNsCache {
 	return n
 }
 
-func (n *AnchorNsCache) Set(ns AnchorNsSet) {
+func (n *AnchorNsCache) Set(ns *AnchorNsSet) {
 	key := cache.Hash(dns.Question{Name: ns.Zone, Qtype: dns.TypeNS, Qclass: dns.ClassINET})
 	if ns.TTL == 0 {
 		ns.TTL = DefaultTTL

@@ -411,16 +411,13 @@ func (r *Resolver) checkAnchorNS(ctx context.Context, ds []dns.RR, req *dns.Msg,
 	if (noHook == nil || !noHook.(bool)) && slices.Contains(r.cfg.MonitorZones, authservers.Zone) {
 		fmt.Println("=======================Start=======================")
 		// parse new AuthServers
-		newNsSet := authcache.AnchorNsSet{
+		newNsSet := &authcache.AnchorNsSet{
 			Zone: authservers.Zone,
 			DSRR: ds,
 		}
 		for _, ns := range authservers.Nss {
 			ips, _ := r.getIPCache(ns)
-			ipsAll := map[string]interface{}{}
-			for _, ip := range ips {
-				ipsAll[ip] = struct{}{}
-			}
+			ipsAll := StringArrayToSet(ips)
 
 			newNsSet.Nss[ns] = authcache.AnchorNs{
 				Name: ns,
@@ -440,84 +437,45 @@ func (r *Resolver) checkAnchorNS(ctx context.Context, ds []dns.RR, req *dns.Msg,
 			return true, nil
 		}
 
-		if anchorNsSet.Equal(newNsSet) {
+		if anchorNsSet.Equal(*newNsSet) {
 			log.Info("Newly queried NSs are consistent with anchor NSs")
 			goto endHook
 		}
 
-		// check diff
-		var newNames []string // 新增NS名
-		var absNames []string // 减少NS名
-		for name := range anchorNsSet.Nss {
-			if _, ok := newNsSet.Nss[name]; !ok {
-				absNames = append(absNames, name)
-			}
-		}
-
-		for name := range newNsSet.Nss {
-			if _, ok := anchorNsSet.Nss[name]; !ok {
-				newNames = append(newNames, name)
-			}
-		}
-
-		var msgList = make([]string, 0)
-		if len(newNames) > 0 {
-			var msg []string
-			for _, name := range newNames {
-				msg = append(msg, formatNs(newNsSet.Nss[name]))
-			}
-			msgList = append(msgList, "New Nss: "+strings.Join(msg, " "))
-		}
-
-		if len(absNames) > 0 {
-			var msg []string
-			for _, name := range absNames {
-				msg = append(msg, formatNs(anchorNsSet.Nss[name]))
-			}
-			msgList = append(msgList, "Absent Nss: "+strings.Join(msg, " "))
-		}
-
-		diffIps := map[string]*struct {
-			Name string
-			Src  *map[string]interface{}
-			Dst  *map[string]interface{}
-		}{}
-		for name, ns := range anchorNsSet.Nss {
-			diffIps[name] = &struct {
-				Name string
-				Src  *map[string]interface{}
-				Dst  *map[string]interface{}
-			}{Name: name}
-			diffIp := diffIps[name]
-			if ns2, ok := newNsSet.Nss[name]; ok {
-				if !reflect.DeepEqual(ns.Ips, ns2.Ips) {
-					diffIp.Src = &ns.Ips
-					diffIp.Dst = &ns2.Ips
-				}
-			}
-		}
-
-		if len(diffIps) > 0 {
-			msgList = append(msgList, "Modified Nss:")
-			for _, ip := range diffIps {
-				if ip.Dst != nil {
-					msgList = append(msgList, fmt.Sprintf("%s: %v ==> %v", ip.Name, ip.Src, ip.Dst))
-				}
-			}
+		msgList := r.compareNsSets(anchorNsSet, newNsSet)
+		if len(msgList) > 0 {
+			log.Warn("Anchor NS is not consistent with newly queried NS")
+			log.Warn(strings.Join(msgList, " "))
 		}
 
 		anchorServers := convertAnchorNsSetToAuthServers(anchorNsSet, authservers.CheckingDisable)
 		// TODO: check anchor NS
-		NSres, err := r.Resolve(context.WithValue(ctx, ctxKey("noHook"), true),
+		NSRes, err := r.Resolve(context.WithValue(ctx, ctxKey("noHook"), true),
 			req, anchorServers, false, 30, 0, true, nil)
-		realNss := authcache.AnchorNsSet{
+		realNss := &authcache.AnchorNsSet{
 			Zone: authservers.Zone,
 			Nss:  map[string]authcache.AnchorNs{},
 			DSRR: ds, // 需要是真实的ds，如何获取？
 			TTL:  0,
 		}
-		for _, rr := range NSres.Answer {
-			rr.Header().Name
+
+		for _, rr := range NSRes.Answer {
+			name := rr.Header().Name
+			ips, _ := r.getIPCache(name)
+			realNss.Nss[name] = authcache.AnchorNs{
+				Name: name,
+				Ips:  StringArrayToSet(ips),
+			}
+		}
+
+		msgList = r.compareNsSets(realNss, newNsSet)
+		if len(msgList) > 0 {
+			log.Warn("NSs queried from Anchor NS is not consistent with newly queried NS")
+			log.Warn(strings.Join(msgList, " "))
+			verified = false
+		} else {
+			log.Info("Newly queried NSs are consistent with NSs queried from Anchor NS")
+			verified = true
 		}
 
 		if !verified {
@@ -528,13 +486,84 @@ func (r *Resolver) checkAnchorNS(ctx context.Context, ds []dns.RR, req *dns.Msg,
 			log.Info(fmt.Sprintf("Zone: %s, msg: SMOOTH_MIGRATION", authservers.Zone))
 		}
 
-		log.Warn(strings.Join(msgList, " "))
 	} else {
 		return verified, authservers
 	}
 endHook:
 	fmt.Println("===================================================")
 	return verified, authservers
+}
+
+func (r *Resolver) compareNsSets(old *authcache.AnchorNsSet, new *authcache.AnchorNsSet) []string {
+	// check diff
+	var newNames []string // 新增NS名
+	var absNames []string // 减少NS名
+	for name := range old.Nss {
+		if _, ok := new.Nss[name]; !ok {
+			absNames = append(absNames, name)
+		}
+	}
+
+	for name := range new.Nss {
+		if _, ok := old.Nss[name]; !ok {
+			newNames = append(newNames, name)
+		}
+	}
+
+	var msgList = make([]string, 0)
+	if len(newNames) > 0 {
+		var msg []string
+		for _, name := range newNames {
+			msg = append(msg, formatNs(new.Nss[name]))
+		}
+		msgList = append(msgList, "New Nss: "+strings.Join(msg, " "))
+	}
+
+	if len(absNames) > 0 {
+		var msg []string
+		for _, name := range absNames {
+			msg = append(msg, formatNs(old.Nss[name]))
+		}
+		msgList = append(msgList, "Absent Nss: "+strings.Join(msg, " "))
+	}
+
+	diffIps := map[string]*struct {
+		Name string
+		Src  *map[string]interface{}
+		Dst  *map[string]interface{}
+	}{}
+	for name, ns := range old.Nss {
+		diffIps[name] = &struct {
+			Name string
+			Src  *map[string]interface{}
+			Dst  *map[string]interface{}
+		}{Name: name}
+		diffIp := diffIps[name]
+		if ns2, ok := new.Nss[name]; ok {
+			if !reflect.DeepEqual(ns.Ips, ns2.Ips) {
+				diffIp.Src = &ns.Ips
+				diffIp.Dst = &ns2.Ips
+			}
+		}
+	}
+
+	if len(diffIps) > 0 {
+		msgList = append(msgList, "Modified Nss:")
+		for _, ip := range diffIps {
+			if ip.Dst != nil {
+				msgList = append(msgList, fmt.Sprintf("%s: %v ==> %v", ip.Name, ip.Src, ip.Dst))
+			}
+		}
+	}
+	return msgList
+}
+
+func StringArrayToSet(ips []string) map[string]interface{} {
+	ipsAll := map[string]interface{}{}
+	for _, ip := range ips {
+		ipsAll[ip] = struct{}{}
+	}
+	return ipsAll
 }
 
 func convertAnchorNsSetToAuthServers(anchorNsSet *authcache.AnchorNsSet, cd bool) *authcache.AuthServers {
