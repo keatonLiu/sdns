@@ -1,6 +1,7 @@
 package authcache
 
 import (
+	mapset "github.com/deckarep/golang-set/v2"
 	"github.com/miekg/dns"
 	"github.com/semihalev/sdns/cache"
 	"reflect"
@@ -8,18 +9,18 @@ import (
 )
 
 const (
-	DefaultTTL = 10000
+	DefaultTTL              = 100 * time.Hour
+	AnchorNsCacheUpdateDura = 10 * time.Second
 )
 
 type AnchorNs struct {
 	Name string
-	Ips  map[string]interface{}
+	Ips  mapset.Set[string]
 }
 
 type AnchorNsSet struct {
 	Zone string
-	Nss  map[string]AnchorNs
-	DSRR []dns.RR
+	Nss  map[string]*AnchorNs
 	TTL  time.Duration
 
 	ut time.Time
@@ -27,6 +28,15 @@ type AnchorNsSet struct {
 
 func (n AnchorNsSet) Equal(other AnchorNsSet) bool {
 	return reflect.DeepEqual(n, other)
+}
+
+func NewAnchorNsSet(zone string) *AnchorNsSet {
+	return &AnchorNsSet{
+		Zone: zone,
+		TTL:  DefaultTTL,
+		ut:   time.Now().UTC(),
+		Nss:  map[string]*AnchorNs{},
+	}
 }
 
 // AnchorNsCache type
@@ -52,7 +62,7 @@ func (n *AnchorNsCache) Set(ns *AnchorNsSet) {
 		ns.TTL = DefaultTTL
 	}
 	ns.ut = time.Now()
-	n.cache.Add(key, &ns)
+	n.cache.Add(key, ns)
 }
 
 func (n *AnchorNsCache) Get(zone string) (*AnchorNsSet, error) {
@@ -65,7 +75,7 @@ func (n *AnchorNsCache) Get(zone string) (*AnchorNsSet, error) {
 	elapsed := n.now().UTC().Sub(nss.ut)
 
 	if elapsed >= nss.TTL {
-		return nil, cache.ErrCacheExpired
+		return nss, cache.ErrCacheExpired
 	}
 	return nss, nil
 }
