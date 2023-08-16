@@ -9,8 +9,7 @@ import (
 )
 
 const (
-	DefaultTTL              = 100 * time.Hour
-	AnchorNsCacheUpdateDura = 10 * time.Second
+	DefaultTTL = 100 * time.Hour
 )
 
 type AnchorNs struct {

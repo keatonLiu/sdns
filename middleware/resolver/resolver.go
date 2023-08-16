@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"golang.org/x/exp/slices"
 	"net"
+	"reflect"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -375,13 +376,11 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 		r.ncache.Set(key, parentdsrr, authservers, 10*time.Minute)
 
 		// ============================== Hook ================================
-		noHook := ctx.Value(ctxKey("noHook"))
-		if (noHook == nil || !noHook.(bool)) && slices.Contains(r.cfg.MonitorZones, authservers.Zone) {
+		if slices.Contains(r.cfg.MonitorZones, authservers.Zone) {
 			// 立即解析所有IPV6地址
 			r.lookupV6Nss(v6ctx, q, authservers, key, parentdsrr, foundv6, nss, cd)
 			authservers = r.checkAnchorNS(ctx, authservers)
 
-			r.ncache.Set(key, parentdsrr, authservers, 5*time.Second)
 		} else {
 			go r.lookupV6Nss(v6ctx, q, authservers, key, parentdsrr, foundv6, nss, cd)
 		}
@@ -389,6 +388,7 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 
 		// If verified is false here, the authservers will be Anchor authoritative server
 		//r.ncache.Set(key, parentdsrr, authservers, time.Duration(nsrr.Header().Ttl)*time.Second)
+		r.ncache.Set(key, parentdsrr, authservers, 5*time.Second)
 
 		log.Debug("Nameserver cache insert", "key", key, "query", formatQuestion(q), "cd", cd)
 
@@ -442,9 +442,14 @@ func (r *Resolver) checkAnchorNS(ctx context.Context, authservers *authcache.Aut
 			goto endHook
 		}
 
-		newNsSet.Nss["a.dns.cn."].Ips.Add("123.123.123.123")
+		// change a.dns.cn. to aa.dns.cn. as well as change its ip address
+		delete(newNsSet.Nss, "a.dns.cn.")
+		newNsSet.Nss["aa.dns.cn."] = &authcache.AnchorNs{
+			Name: "aa.dns.cn.",
+			Ips:  mapset.NewSet("123.123.123.123"),
+		}
 
-		if anchorNsSet.Equal(*newNsSet) {
+		if reflect.DeepEqual(anchorNsSet.Nss, newNsSet.Nss) {
 			log.Info("Newly queried NSs are consistent with anchor NSs")
 			goto endHook
 		}
@@ -508,21 +513,21 @@ func toJsonString(data interface{}) string {
 }
 
 func (r *Resolver) taskUpdateAnchorNs(ctx context.Context, zone string) {
-	log.Info(fmt.Sprintf("Start auto update anchor NS for zone %v, duration: %v", zone, authcache.AnchorNsCacheUpdateDura))
-	ticker := time.NewTicker(authcache.AnchorNsCacheUpdateDura)
+	log.Info(fmt.Sprintf("Start auto update anchor NS for zone %v, duration: %v",
+		zone, r.cfg.AnchorUpdateInterval.Duration))
+	ticker := time.NewTicker(r.cfg.AnchorUpdateInterval.Duration)
 	for range ticker.C {
 		r.updateAnchorNS(ctx, zone)
 	}
 }
 
 func (r *Resolver) queryNSSetFromAnchorNs(ctx context.Context, zone string, anchorServers *authcache.AuthServers) *authcache.AnchorNsSet {
+	// Make a NS request for the Zone
 	req := &dns.Msg{Question: []dns.Question{
 		{Name: zone, Qtype: dns.TypeNS, Qclass: dns.ClassINET},
 	}}
 
-	req.Question[0].Name = zone
-	NSRes, err := r.Resolve(context.WithValue(ctx, ctxKey("noHook"), true),
-		req, anchorServers, false, 30, 0, true, nil)
+	NSRes, err := r.groupLookup(ctx, req, anchorServers)
 
 	if err != nil {
 		log.Error(fmt.Sprintf("Failed to ask anchor servers for zone: %s, err: %s", anchorServers.Zone, err.Error()))
@@ -554,7 +559,7 @@ func (r *Resolver) compareNsSets(old *authcache.AnchorNsSet, new *authcache.Anch
 	if newNames.Cardinality() > 0 {
 		var msg []string
 		for name := range newNames.Iter() {
-			msg = append(msg, formatNs(new.Nss[name]))
+			msg = append(msg, AnchorNsToString(new.Nss[name]))
 		}
 		msgList = append(msgList, "New NSs: "+strings.Join(msg, " "))
 	}
@@ -562,7 +567,7 @@ func (r *Resolver) compareNsSets(old *authcache.AnchorNsSet, new *authcache.Anch
 	if absNames.Cardinality() > 0 {
 		var msg []string
 		for name := range absNames.Iter() {
-			msg = append(msg, formatNs(old.Nss[name]))
+			msg = append(msg, AnchorNsToString(old.Nss[name]))
 		}
 		msgList = append(msgList, "Absent NSs: "+strings.Join(msg, " "))
 	}
@@ -619,81 +624,8 @@ func NSSetToAuthServers(anchorNsSet *authcache.AnchorNsSet, cd bool) *authcache.
 	return oldAuthServers
 }
 
-func formatNs(ns *authcache.AnchorNs) string {
+func AnchorNsToString(ns *authcache.AnchorNs) string {
 	return fmt.Sprintf("%s: %s", ns.Name, toJsonString(ns.Ips))
-}
-
-func (r *Resolver) getMasterServerName(ctx context.Context, req *dns.Msg, zone string, oldAuthServers *authcache.AuthServers) (string, error) {
-	resSOA, err := r.getSOA(ctx, req, zone, oldAuthServers)
-	if err != nil {
-		return "", err
-	}
-	realMasterServerName := findMasterServerNameFromSOAResponse(resSOA)
-	return realMasterServerName, nil
-}
-
-func (r *Resolver) getSOA(ctx context.Context, req *dns.Msg, zone string, oldAuthServers *authcache.AuthServers) (*dns.Msg, error) {
-	reqSOA := req.Copy()
-	reqSOA.SetQuestion(zone, dns.TypeSOA)
-	resSOA, err := r.Resolve(context.WithValue(ctx, ctxKey("noHook"), true),
-		reqSOA, oldAuthServers, false, 30, 0, true, nil)
-	return resSOA, err
-}
-
-func extractNewAddrs(newMasterIps []string, oldMasterIps []string) []string {
-	newAddrs := make([]string, 0)
-	for _, addr := range newMasterIps {
-		if !slices.Contains(oldMasterIps, addr) {
-			newAddrs = append(newAddrs, addr)
-		}
-	}
-	return newAddrs
-}
-
-func (r *Resolver) getIpAddressesForName(ctx context.Context, name string, authServers *authcache.AuthServers) ([]string, error) {
-	ips := make([]string, 0)
-	reqA := &dns.Msg{}
-	reqA.SetQuestion(name, dns.TypeA)
-	resA, err := r.Resolve(context.WithValue(ctx, ctxKey("noHook"), true), reqA,
-		authServers, false, 30, 0, true, nil)
-	if err == nil {
-		for _, rr := range resA.Answer {
-			if a, ok := rr.(*dns.A); ok {
-				ips = append(ips, a.A.String())
-			}
-		}
-	} else {
-		log.Warn(fmt.Sprintf("Failed to get IP addresses for %v: %v", name, err))
-	}
-
-	reqAAAA := &dns.Msg{}
-	reqAAAA.SetQuestion(name, dns.TypeAAAA)
-	resAAAA, err := r.Resolve(context.WithValue(ctx, ctxKey("noHook"), true), reqAAAA,
-		authServers, false, 30, 0, true, nil)
-	if err == nil {
-		for _, rr := range resAAAA.Answer {
-			if a, ok := rr.(*dns.AAAA); ok {
-				ips = append(ips, a.AAAA.String())
-			}
-		}
-	} else {
-		log.Warn(fmt.Sprintf("Failed to get IP addresses for %v: %v", name, err))
-	}
-
-	return ips, nil
-}
-
-func findMasterServerNameFromSOAResponse(resSOA *dns.Msg) string {
-	var rrSet []dns.RR
-	rrSet = append(rrSet, resSOA.Ns...)
-	rrSet = append(rrSet, resSOA.Answer...)
-	rrSet = append(rrSet, resSOA.Extra...)
-	for _, rr := range rrSet {
-		if soa, ok := rr.(*dns.SOA); ok {
-			return soa.Ns
-		}
-	}
-	return ""
 }
 
 func (r *Resolver) groupLookup(ctx context.Context, req *dns.Msg, servers *authcache.AuthServers) (resp *dns.Msg, err error) {

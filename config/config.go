@@ -19,44 +19,45 @@ const configver = "1.3.2"
 
 // Config type
 type Config struct {
-	Version          string
-	BlockLists       []string
-	BlockListDir     string
-	RootServers      []string
-	Root6Servers     []string
-	RootKeys         []string
-	FallbackServers  []string
-	ForwarderServers []string
-	AccessList       []string
-	LogLevel         string
-	AccessLog        string
-	Bind             string
-	BindTLS          string
-	BindDOH          string
-	BindDOQ          string
-	TLSCertificate   string
-	TLSPrivateKey    string
-	API              string
-	Nullroute        string
-	Nullroutev6      string
-	Hostsfile        string
-	OutboundIPs      []string
-	OutboundIP6s     []string
-	Timeout          Duration
-	Expire           uint32
-	CacheSize        int
-	Prefetch         uint32
-	Maxdepth         int
-	RateLimit        int
-	ClientRateLimit  int
-	CookieSecret     string
-	NSID             string
-	Blocklist        []string
-	Whitelist        []string
-	Chaos            bool
-	QnameMinLevel    int `toml:"qname_min_level"`
-	EmptyZones       []string
-	MonitorZones     []string `toml:"monitor_zones"`
+	Version              string
+	BlockLists           []string
+	BlockListDir         string
+	RootServers          []string
+	Root6Servers         []string
+	RootKeys             []string
+	FallbackServers      []string
+	ForwarderServers     []string
+	AccessList           []string
+	LogLevel             string
+	AccessLog            string
+	Bind                 string
+	BindTLS              string
+	BindDOH              string
+	BindDOQ              string
+	TLSCertificate       string
+	TLSPrivateKey        string
+	API                  string
+	Nullroute            string
+	Nullroutev6          string
+	Hostsfile            string
+	OutboundIPs          []string
+	OutboundIP6s         []string
+	Timeout              Duration
+	Expire               uint32
+	CacheSize            int
+	Prefetch             uint32
+	Maxdepth             int
+	RateLimit            int
+	ClientRateLimit      int
+	CookieSecret         string
+	NSID                 string
+	Blocklist            []string
+	Whitelist            []string
+	Chaos                bool
+	QnameMinLevel        int `toml:"qname_min_level"`
+	EmptyZones           []string
+	MonitorZones         []string `toml:"monitor_zones"`
+	AnchorUpdateInterval Duration `toml:"anchor_update_interval"`
 
 	Plugins map[string]Plugin
 
@@ -260,6 +261,9 @@ emptyzones = []
 
 # Set the zones to monitor
 monitor_zones = []
+
+# Set the update interval of the anchor NS (in seconds)
+anchor_update_interval = 3600
 
 # You can add your own plugins to sdns. The plugin order is very important. 
 # Plugins can be load before cache middleware.
