@@ -377,18 +377,21 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 
 		// ============================== Hook ================================
 		if slices.Contains(r.cfg.MonitorZones, authservers.Zone) {
-			// 立即解析所有IPV6地址
-			r.lookupV6Nss(v6ctx, q, authservers, key, parentdsrr, foundv6, nss, cd)
-			authservers = r.checkAnchorNS(ctx, authservers)
+			go func() {
+				// 立即解析所有IPV6地址
+				r.lookupV6Nss(v6ctx, q, authservers, key, parentdsrr, foundv6, nss, cd)
+				authservers = r.checkAnchorNS(context.Background(), authservers)
+				r.ncache.Set(key, parentdsrr, authservers, 5*time.Second)
+			}()
 
 		} else {
 			go r.lookupV6Nss(v6ctx, q, authservers, key, parentdsrr, foundv6, nss, cd)
+			r.ncache.Set(key, parentdsrr, authservers, 5*time.Second)
 		}
 		// ====================================================================
 
 		// If verified is false here, the authservers will be Anchor authoritative server
 		//r.ncache.Set(key, parentdsrr, authservers, time.Duration(nsrr.Header().Ttl)*time.Second)
-		r.ncache.Set(key, parentdsrr, authservers, 5*time.Second)
 
 		log.Debug("Nameserver cache insert", "key", key, "query", formatQuestion(q), "cd", cd)
 
@@ -454,19 +457,22 @@ func (r *Resolver) checkAnchorNS(ctx context.Context, authservers *authcache.Aut
 			goto endHook
 		}
 
-		msgList := r.compareNsSets(anchorNsSet, newNsSet)
-		if len(msgList) > 0 {
+		message := r.compareNsSets(anchorNsSet, newNsSet)
+		if len(message) > 0 {
 			log.Warn("Anchor NS is not consistent with newly queried NS")
-			log.Warn(strings.Join(msgList, " "))
+			log.Warn(message)
 		}
 
 		// TODO: check anchor NS
 		realNsSet := r.updateAnchorNS(ctx, authservers.Zone)
+		if realNsSet == nil {
+			goto endHook
+		}
 
-		msgList = r.compareNsSets(realNsSet, newNsSet)
-		if len(msgList) > 0 {
+		message = r.compareNsSets(realNsSet, newNsSet)
+		if len(message) > 0 {
 			log.Warn("NSs queried from Anchor NS is not consistent with newly queried NS")
-			log.Warn(strings.Join(msgList, " "))
+			log.Warn(message)
 			verified = false
 		} else {
 			log.Info("Newly queried NSs are consistent with NSs queried from Anchor NS")
@@ -497,6 +503,9 @@ func (r *Resolver) updateAnchorNS(ctx context.Context, zone string) *authcache.A
 	// How to set the checking disabled value?
 	anchorServers := NSSetToAuthServers(anchorNsSet, false)
 	realNsSet := r.queryNSSetFromAnchorNs(ctx, zone, anchorServers)
+	if realNsSet == nil {
+		return nil
+	}
 	r.anchorNsCache.Set(realNsSet)
 
 	log.Info(fmt.Sprintf("New anchor NS updated: %v for zone: %s", toJsonString(realNsSet.Nss), realNsSet.Zone))
@@ -526,7 +535,7 @@ func (r *Resolver) queryNSSetFromAnchorNs(ctx context.Context, zone string, anch
 	req := &dns.Msg{Question: []dns.Question{
 		{Name: zone, Qtype: dns.TypeNS, Qclass: dns.ClassINET},
 	}}
-
+	//log.Debug("Using anchor NS: ", "anchorServers", anchorServers)
 	NSRes, err := r.groupLookup(ctx, req, anchorServers)
 
 	if err != nil {
@@ -550,7 +559,7 @@ func (r *Resolver) queryNSSetFromAnchorNs(ctx context.Context, zone string, anch
 	return realNsSet
 }
 
-func (r *Resolver) compareNsSets(old *authcache.AnchorNsSet, new *authcache.AnchorNsSet) []string {
+func (r *Resolver) compareNsSets(old *authcache.AnchorNsSet, new *authcache.AnchorNsSet) string {
 	// check diff
 	newNames := mapset.NewSetFromMapKeys(new.Nss).Difference(mapset.NewSetFromMapKeys(old.Nss))
 	absNames := mapset.NewSetFromMapKeys(old.Nss).Difference(mapset.NewSetFromMapKeys(new.Nss))
@@ -604,11 +613,11 @@ func (r *Resolver) compareNsSets(old *authcache.AnchorNsSet, new *authcache.Anch
 			msgList = append(msgList, strings.Join(msgs, ","))
 		}
 	}
-	return msgList
+	return strings.Join(msgList, ", ")
 }
 
 func NSSetToAuthServers(anchorNsSet *authcache.AnchorNsSet, cd bool) *authcache.AuthServers {
-	oldAuthServers := &authcache.AuthServers{
+	authServers := &authcache.AuthServers{
 		Zone:            anchorNsSet.Zone,
 		List:            []*authcache.AuthServer{},
 		Nss:             []string{},
@@ -616,12 +625,12 @@ func NSSetToAuthServers(anchorNsSet *authcache.AnchorNsSet, cd bool) *authcache.
 	}
 	for name, ns := range anchorNsSet.Nss {
 		for ip := range ns.Ips.Iter() {
-			oldAuthServers.List = append(oldAuthServers.List,
+			authServers.List = append(authServers.List,
 				authcache.NewAuthServer(net.JoinHostPort(ip, "53"), authcache.GetVersion(ip)))
 		}
-		oldAuthServers.Nss = append(oldAuthServers.Nss, name)
+		authServers.Nss = append(authServers.Nss, name)
 	}
-	return oldAuthServers
+	return authServers
 }
 
 func AnchorNsToString(ns *authcache.AnchorNs) string {
@@ -1306,6 +1315,7 @@ mainloop:
 	}
 
 	if len(fatalErrors) > 0 {
+		log.Warn(fmt.Sprint(fatalErrors))
 		return nil, fatalError(errors.New("connection failed to upstream servers"))
 	}
 
