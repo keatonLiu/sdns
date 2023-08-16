@@ -4,7 +4,6 @@ import (
 	mapset "github.com/deckarep/golang-set/v2"
 	"github.com/miekg/dns"
 	"github.com/semihalev/sdns/cache"
-	"reflect"
 	"time"
 )
 
@@ -23,10 +22,6 @@ type AnchorNsSet struct {
 	TTL  time.Duration
 
 	ut time.Time
-}
-
-func (n AnchorNsSet) Equal(other AnchorNsSet) bool {
-	return reflect.DeepEqual(n, other)
 }
 
 func NewAnchorNsSet(zone string) *AnchorNsSet {

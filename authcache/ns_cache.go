@@ -76,6 +76,6 @@ func (n *NSCache) Remove(key uint64) {
 const (
 	maximumTTL = 12 * time.Hour
 	//minimumTTL = 1 * time.Hour
-	minimumTTL = time.Duration(5) * time.Second
+	minimumTTL = 1 * time.Second
 	defaultCap = 1024 * 256
 )
