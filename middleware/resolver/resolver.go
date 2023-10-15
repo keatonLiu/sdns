@@ -152,7 +152,9 @@ func (r *Resolver) parseOutBoundAddrs(cfg *config.Config) {
 }
 
 // Resolve iterate recursively over the domains
-func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache.AuthServers, root bool, depth int, level int, nomin bool, parentdsrr []dns.RR, extra ...bool) (*dns.Msg, error) {
+func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache.AuthServers,
+	root bool, depth int, level int, nomin bool, parentdsrr []dns.RR, extra ...bool) (*dns.Msg, error) {
+
 	q := req.Question[0]
 
 	if root {

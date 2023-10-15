@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"github.com/semihalev/log"
 	"math"
-	"net"
 	"os"
 	"strings"
 	"sync"
@@ -255,26 +254,26 @@ func (w *ResponseWriter) WriteMsg(res *dns.Msg) error {
 	if duration > 0 {
 		w.set(key, res, mt, duration)
 		// TODO: can modify cache here
-		if res.Question[0].Name == "www.baidu.com." && res.Question[0].Qtype == dns.TypeA {
-			log.Debug("Modifying cache")
-			if i, ok := w.pcache.Get(key); ok {
-				itm := i.(*item)
-				itm.Answer = []dns.RR{
-					&dns.A{
-						Hdr: dns.RR_Header{
-							Name:   "www.baidu.com.",
-							Rrtype: dns.TypeA,
-							Class:  dns.ClassINET,
-						},
-						A: net.ParseIP("10.10.10.10"),
-					},
-				}
-				itm.origTTL = 150
-				w.pcache.Add(key, i)
-			} else {
-				log.Debug("Cache not found")
-			}
-		}
+		//if res.Question[0].Name == "www.baidu.com." && res.Question[0].Qtype == dns.TypeA {
+		//	log.Debug("Modifying cache")
+		//	if i, ok := w.pcache.Get(key); ok {
+		//		itm := i.(*item)
+		//		itm.Answer = []dns.RR{
+		//			&dns.A{
+		//				Hdr: dns.RR_Header{
+		//					Name:   "www.baidu.com.",
+		//					Rrtype: dns.TypeA,
+		//					Class:  dns.ClassINET,
+		//				},
+		//				A: net.ParseIP("10.10.10.10"),
+		//			},
+		//		}
+		//		itm.origTTL = 150
+		//		w.pcache.Add(key, i)
+		//	} else {
+		//		log.Debug("Cache not found")
+		//	}
+		//}
 	}
 
 	if !w.Internal() {
