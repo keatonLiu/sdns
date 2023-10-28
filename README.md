@@ -71,11 +71,20 @@ $ yay -S sdns-git
 
 ## Building
 
+Linux:
 ```shell
 $ go build
 
 $ # Cross compile to linux amd64
 $ CGO_ENABLED=0  GOOS=linux  GOARCH=amd64 go build
+```
+
+Powershell:
+```powershell
+$env:CGO_ENABLED=0
+$env:GOOS="linux"
+$env:GOARCH="amd64"
+go build
 ```
 
 ## Testing

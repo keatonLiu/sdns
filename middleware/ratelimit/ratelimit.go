@@ -57,6 +57,7 @@ func (r *RateLimit) ServeDNS(ctx context.Context, ch *middleware.Chain) {
 		return
 	}
 
+	// If rate limit is 0, don't do rate limit
 	if r.rate == 0 {
 		ch.Next(ctx)
 		return

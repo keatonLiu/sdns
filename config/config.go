@@ -262,8 +262,8 @@ emptyzones = []
 # Set the zones to monitor
 monitor_zones = []
 
-# Set the update interval of the anchor NS (in seconds)
-anchor_update_interval = 3600
+# Set the update interval of the anchor NS
+anchor_update_interval = "1h"
 
 # You can add your own plugins to sdns. The plugin order is very important. 
 # Plugins can be load before cache middleware.
