@@ -6,18 +6,24 @@ import (
 	"testing"
 
 	"github.com/miekg/dns"
+	"github.com/semihalev/log"
 	"github.com/semihalev/sdns/config"
 	"github.com/semihalev/sdns/middleware"
 	"github.com/semihalev/sdns/mock"
 	"github.com/stretchr/testify/assert"
 )
 
-func Test_recoveryDNS(t *testing.T) {
+func Test_Recovery(t *testing.T) {
+	log.Root().SetHandler(log.LvlFilterHandler(0, log.StdoutHandler))
+
 	stderr := os.Stderr
 	os.Stderr, _ = os.Open(os.DevNull)
 
+	middleware.Register("recovery", func(cfg *config.Config) middleware.Handler { return New(cfg) })
 	middleware.Setup(&config.Config{})
+
 	r := middleware.Get("recovery").(*Recovery)
+
 	assert.Equal(t, "recovery", r.Name())
 
 	ch := middleware.NewChain([]middleware.Handler{r, nil})

@@ -10,8 +10,10 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/semihalev/log"
 	"github.com/semihalev/sdns/middleware"
 	"github.com/semihalev/sdns/middleware/blocklist"
+	"github.com/semihalev/sdns/mock"
 	"github.com/stretchr/testify/assert"
 
 	"github.com/miekg/dns"
@@ -159,12 +161,36 @@ func TestClearDNSSEC(t *testing.T) {
 	}
 }
 
+func TestExchange(t *testing.T) {
+	req := new(dns.Msg)
+	req.SetQuestion(".", dns.TypeNS)
+	req.SetEdns0(512, true)
+
+	_, err := Exchange(context.Background(), req, "8.8.8.8:53", "udp")
+	assert.NoError(t, err)
+}
+
+func TestNoSupported(t *testing.T) {
+	req := new(dns.Msg)
+	req.SetQuestion("example.com.", dns.TypeNS)
+
+	mw := mock.NewWriter("udp", "127.0.0.1:0")
+
+	err := NotSupported(mw, req)
+
+	assert.NoError(t, err)
+	assert.Equal(t, dns.RcodeNotImplemented, mw.Msg().Rcode)
+}
+
 func TestExchangeInternal(t *testing.T) {
+	log.Root().SetHandler(log.LvlFilterHandler(0, log.StdoutHandler))
+
 	cfg := new(config.Config)
 	cfg.Nullroute = "0.0.0.0"
 	cfg.Nullroutev6 = "::0"
 	cfg.BlockListDir = filepath.Join(os.TempDir(), "sdns_temp")
 
+	middleware.Register("blocklist", func(cfg *config.Config) middleware.Handler { return blocklist.New(cfg) })
 	middleware.Setup(cfg)
 
 	blocklist := middleware.Get("blocklist").(*blocklist.BlockList)

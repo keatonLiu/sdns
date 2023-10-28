@@ -4,7 +4,7 @@
 sdns
 sdns.conf
 coverage.out
-bl
+db
 access.log
 vendor
 go_build_sdns_go

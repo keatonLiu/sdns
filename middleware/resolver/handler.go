@@ -25,10 +25,6 @@ type ctxKey string
 var debugns bool
 
 func init() {
-	middleware.Register(name, func(cfg *config.Config) middleware.Handler {
-		return New(cfg)
-	})
-
 	_, debugns = os.LookupEnv("SDNS_DEBUGNS")
 }
 
@@ -36,6 +32,10 @@ func init() {
 func New(cfg *config.Config) *DNSHandler {
 	if cfg.Maxdepth == 0 {
 		cfg.Maxdepth = 30
+	}
+
+	if cfg.QueryTimeout.Duration == 0 {
+		cfg.QueryTimeout.Duration = 10 * time.Second
 	}
 
 	return &DNSHandler{
@@ -106,13 +106,11 @@ func (h *DNSHandler) handle(ctx context.Context, req *dns.Msg) *dns.Msg {
 	req.RecursionDesired = false
 	req.AuthenticatedData = false
 
-	//TODO (semihalev): config setable after this
-	ctx, cancel := context.WithDeadline(ctx, time.Now().Add(30*time.Second))
+	ctx, cancel := context.WithDeadline(ctx, time.Now().Add(h.cfg.QueryTimeout.Duration))
 	defer cancel()
 
 	depth := h.cfg.Maxdepth
-	resp, err := h.resolver.Resolve(ctx, req, h.resolver.rootservers, true, depth, 0, false, nil)
-
+	resp, err := h.resolver.Resolve(ctx, req, h.resolver.rootservers, true, depth, 0, false, nil, q.Name == rootzone)
 	if err != nil {
 		log.Info("Resolve query failed", "query", formatQuestion(q), "error", err.Error())
 

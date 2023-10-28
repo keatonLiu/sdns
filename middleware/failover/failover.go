@@ -25,12 +25,6 @@ type ResponseWriter struct {
 	f *Failover
 }
 
-func init() {
-	middleware.Register(name, func(cfg *config.Config) middleware.Handler {
-		return New(cfg)
-	})
-}
-
 // New return failover
 func New(cfg *config.Config) *Failover {
 	fallbackservers := []string{}
@@ -77,7 +71,6 @@ func (w *ResponseWriter) WriteMsg(m *dns.Msg) error {
 	req.SetQuestion(m.Question[0].Name, m.Question[0].Qtype)
 	req.Question[0].Qclass = m.Question[0].Qclass
 	req.SetEdns0(dnsutil.DefaultMsgSize, true)
-	req.RecursionDesired = true
 	req.CheckingDisabled = m.CheckingDisabled
 
 	ctx := context.Background()

@@ -1,0 +1,4 @@
+contact_links:
+  - name: Feature Request
+    url: https://github.com/semihalev/sdns/discussions/new?category=ideas
+    about: Discuss a new feture for SDNS

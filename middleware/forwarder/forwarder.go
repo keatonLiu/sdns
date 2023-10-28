@@ -12,27 +12,35 @@ import (
 	"github.com/semihalev/sdns/middleware"
 )
 
-// Forwarder type
-type Forwarder struct {
-	servers []string
+type server struct {
+	Addr  string
+	Proto string
 }
 
-func init() {
-	middleware.Register(name, func(cfg *config.Config) middleware.Handler {
-		return New(cfg)
-	})
+// Forwarder type
+type Forwarder struct {
+	servers []*server
 }
 
 // New return forwarder
 func New(cfg *config.Config) *Forwarder {
-	forwarderservers := []string{}
+	forwarderservers := []*server{}
 	for _, s := range cfg.ForwarderServers {
+		srv := &server{Proto: "udp"}
+
+		if strings.HasPrefix(s, "tls://") {
+			s = strings.TrimPrefix(s, "tls://")
+			srv.Proto = "tcp-tls"
+		}
+
 		host, _, _ := net.SplitHostPort(s)
 
 		if ip := net.ParseIP(host); ip != nil && ip.To4() != nil {
-			forwarderservers = append(forwarderservers, s)
+			srv.Addr = s
+			forwarderservers = append(forwarderservers, srv)
 		} else if ip != nil && ip.To16() != nil {
-			forwarderservers = append(forwarderservers, s)
+			srv.Addr = s
+			forwarderservers = append(forwarderservers, srv)
 		} else {
 			log.Error("Forwarder server is not correct. Check your config.", "server", s)
 		}
@@ -57,11 +65,10 @@ func (f *Forwarder) ServeDNS(ctx context.Context, ch *middleware.Chain) {
 	fReq.SetQuestion(req.Question[0].Name, req.Question[0].Qtype)
 	fReq.Question[0].Qclass = req.Question[0].Qclass
 	fReq.SetEdns0(dnsutil.DefaultMsgSize, true)
-	fReq.RecursionDesired = true
 	fReq.CheckingDisabled = req.CheckingDisabled
 
 	for _, server := range f.servers {
-		resp, err := dnsutil.Exchange(ctx, req, server, "udp")
+		resp, err := dnsutil.Exchange(ctx, req, server.Addr, server.Proto)
 		if err != nil {
 			log.Warn("forwarder query failed", "query", formatQuestion(req.Question[0]), "error", err.Error())
 			continue

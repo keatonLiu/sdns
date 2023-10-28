@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/miekg/dns"
+	"github.com/semihalev/log"
 	"github.com/semihalev/sdns/config"
 	"github.com/semihalev/sdns/middleware"
 	"github.com/semihalev/sdns/mock"
@@ -12,12 +13,15 @@ import (
 )
 
 func Test_AS112(t *testing.T) {
+	log.Root().SetHandler(log.LvlFilterHandler(0, log.StdoutHandler))
+
 	cfg := new(config.Config)
 	cfg.EmptyZones = []string{
 		"10.in-addr.arpa.",
 		"example.arpa",
 	}
 
+	middleware.Register("as112", func(cfg *config.Config) middleware.Handler { return New(cfg) })
 	middleware.Setup(cfg)
 
 	a := middleware.Get("as112").(*AS112)

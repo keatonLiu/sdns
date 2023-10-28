@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/miekg/dns"
+	"github.com/semihalev/log"
 	"github.com/semihalev/sdns/config"
 	"github.com/semihalev/sdns/middleware"
 	"github.com/semihalev/sdns/mock"
@@ -13,10 +14,13 @@ import (
 )
 
 func Test_accesslog(t *testing.T) {
+	log.Root().SetHandler(log.LvlFilterHandler(0, log.StdoutHandler))
+
 	cfg := &config.Config{
 		AccessLog: "access_test.log",
 	}
 
+	middleware.Register("accesslog", func(cfg *config.Config) middleware.Handler { return New(cfg) })
 	middleware.Setup(cfg)
 	a := middleware.Get("accesslog").(*AccessLog)
 
