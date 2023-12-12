@@ -27,7 +27,10 @@ import (
 type Resolver struct {
 	sync.RWMutex
 
+	// Cache for nameservers of specific query(the query type must be NS)
 	ncache *authcache.NSCache
+	// Cache for anchor nameservers
+	anchorNsCache *authcache.AnchorNsCache
 
 	cfg *config.Config
 
@@ -39,8 +42,6 @@ type Resolver struct {
 	// glue addrs cache
 	ipv4cache *cache.Cache
 	ipv6cache *cache.Cache
-
-	anchorNsCache *authcache.AnchorNsCache
 
 	rootkeys []dns.RR
 
@@ -367,10 +368,13 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 
 		log.Debug("Nameserver cache not found", "key", key, "query", formatQuestion(q), "cd", cd)
 
+		// 先检查胶水记录有没有
 		authservers, foundv4, foundv6 := r.checkGlueRR(resp, nss, level)
 		authservers.CheckingDisable = cd
 		authservers.Zone = q.Name
+		// 如果没有胶水记录，就去查权威服务器的IP地址（也会查缓存，防止重复查询胶水已经有的）
 		r.lookupV4Nss(ctx, q, authservers, key, parentdsrr, foundv4, nss, cd)
+		// 如果没有查到权威服务器，则查上一级域名的权威服务器
 		if len(authservers.List) == 0 {
 			if minimized && level < nlevel {
 				level++
@@ -380,33 +384,39 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 			return nil, errors.New("nameservers are unreachable")
 		}
 
-		//copy reqid
-		reqid := ctx.Value(ctxKey("reqid"))
-		v6ctx := context.WithValue(context.Background(), ctxKey("reqid"), reqid)
-		v6ctx, cancel := context.WithTimeout(v6ctx, 1*time.Minute)
-
 		// temporary set cache, prevent infinite recursion running lookupV6Nss
 		r.ncache.Set(key, parentdsrr, authservers, 1*time.Minute)
 
+		// 异步查询权威服务器的IPV6地址
+		var v6ctx context.Context
 		if r.cfg.IPv6Access {
+			var cancel context.CancelFunc
+			//copy reqid
+			v6ctx = context.WithValue(context.Background(), ctxKey("reqid"), ctx.Value(ctxKey("reqid")))
+			v6ctx, cancel = context.WithTimeout(v6ctx, 1*time.Minute)
 			go func() {
 				defer cancel()
 				r.lookupV6Nss(v6ctx, q, authservers, key, parentdsrr, foundv6, nss, cd)
 			}()
 		}
 
+		// cache TTL for current AuthServers
+		nsrrTTL := time.Duration(nsrr.Header().Ttl) * time.Second
+
 		// ============================== Hook ================================
 		if slices.Contains(r.cfg.MonitorZones, authservers.Zone) {
 			log.Info("Started NS check", "zone", authservers.Zone)
 			go func() {
-				// 立即解析所有IPV6地址
-				<-v6ctx.Done()
+				// 等待解析所有IPV6地址
+				if r.cfg.IPv6Access {
+					<-v6ctx.Done()
+				}
 				authservers = r.checkAnchorNS(context.Background(), authservers)
-				r.ncache.Set(key, parentdsrr, authservers, 5*time.Second)
+				r.ncache.Set(key, parentdsrr, authservers, nsrrTTL)
 			}()
 
 		} else {
-			r.ncache.Set(key, parentdsrr, authservers, 5*time.Second)
+			r.ncache.Set(key, parentdsrr, authservers, nsrrTTL)
 		}
 		// ====================================================================
 
@@ -439,7 +449,7 @@ func (r *Resolver) checkAnchorNS(ctx context.Context, authservers *authcache.Aut
 	verified := true // 权威服务器是否通过检验（控制是否更新到缓存）
 	fmt.Println("=======================Start=======================")
 	{
-		// parse new AuthServers
+		// parse new AuthServers from parent
 		newNsSet := authcache.NewAnchorNsSet(authservers.Zone)
 		for _, ns := range authservers.Nss {
 			ips, _ := r.getIPCache(ns)
@@ -450,6 +460,7 @@ func (r *Resolver) checkAnchorNS(ctx context.Context, authservers *authcache.Aut
 			}
 		}
 
+		// 获取信任锚缓存
 		anchorNsSet, err := r.anchorNsCache.Get(authservers.Zone)
 		// 信任锚缓存过期
 		// TODO: auto update cache
@@ -465,11 +476,11 @@ func (r *Resolver) checkAnchorNS(ctx context.Context, authservers *authcache.Aut
 		}
 
 		// change a.dns.cn. to aa.dns.cn. as well as change its ip address
-		delete(newNsSet.Nss, "a.dns.cn.")
-		newNsSet.Nss["aa.dns.cn."] = &authcache.AnchorNs{
-			Name: "aa.dns.cn.",
-			Ips:  mapset.NewSet("123.123.123.123"),
-		}
+		//delete(newNsSet.Nss, "a.dns.cn.")
+		//newNsSet.Nss["aa.dns.cn."] = &authcache.AnchorNs{
+		//	Name: "aa.dns.cn.",
+		//	Ips:  mapset.NewSet("123.123.123.123"),
+		//}
 
 		message := r.compareNsSets(anchorNsSet, newNsSet)
 		if len(message) > 0 {
@@ -515,7 +526,7 @@ func (r *Resolver) updateAnchorNSCache(ctx context.Context, zone string) *authca
 		return nil
 	}
 
-	// How to set the checking disabled value?
+	// How to set the checking disabled value（NSSEC）?
 	anchorServers := NSSetToAuthServers(anchorNsSet, false)
 	realNsSet := r.queryNSSetFromAnchorNs(ctx, zone, anchorServers)
 	if realNsSet == nil {
@@ -577,7 +588,9 @@ func (r *Resolver) compareNsSets(old *authcache.AnchorNsSet, new *authcache.Anch
 	// check diff
 	newNssSet := mapset.NewSetFromMapKeys(new.Nss)
 	oldNssSet := mapset.NewSetFromMapKeys(old.Nss)
+	// 新增的NS
 	newNames := newNssSet.Difference(oldNssSet)
+	// 消失的NS
 	absNames := oldNssSet.Difference(newNssSet)
 
 	var msgList = make([]string, 0)
@@ -597,7 +610,9 @@ func (r *Resolver) compareNsSets(old *authcache.AnchorNsSet, new *authcache.Anch
 		msgList = append(msgList, "Absent NSs: "+strings.Join(msg, " "))
 	}
 
+	// 一个权威对应两个IP集合，分别是旧的和新的
 	diffIps := map[string][2]mapset.Set[string]{}
+	// 比较old和new的NS，找出IP列表不同的NS添加到diffIps中
 	for name, src := range old.Nss {
 		diffIp := diffIps[name]
 		if dst, ok := new.Nss[name]; ok {
@@ -1090,20 +1105,28 @@ func (r *Resolver) answer(ctx context.Context, req, resp *dns.Msg, parentdsrr []
 	resp = r.clearAdditional(req, resp, extra...)
 
 	if req.Question[0].Qtype == dns.TypeNS {
-		for _, rr := range resp.Answer {
-			if rr.Header().Rrtype == dns.TypeNS {
-				name := rr.(*dns.NS).Ns
-				if iPv4, ok := r.getIPv4Cache(name); ok {
-					resp.Extra = append(resp.Extra, &dns.A{
-						Hdr: dns.RR_Header{
-							Name:   name,
-							Rrtype: dns.TypeA,
-							Class:  dns.ClassINET,
-							Ttl:    rr.Header().Ttl,
-						},
-						A: net.ParseIP(iPv4[0]),
-					})
-				}
+		r.addExtra(resp)
+	}
+
+	return resp, nil
+}
+
+func (r *Resolver) addExtra(resp *dns.Msg) {
+	for _, rr := range resp.Answer {
+		if rr.Header().Rrtype == dns.TypeNS {
+			name := rr.(*dns.NS).Ns
+			if iPv4, ok := r.getIPv4Cache(name); ok {
+				resp.Extra = append(resp.Extra, &dns.A{
+					Hdr: dns.RR_Header{
+						Name:   name,
+						Rrtype: dns.TypeA,
+						Class:  dns.ClassINET,
+						Ttl:    rr.Header().Ttl,
+					},
+					A: net.ParseIP(iPv4[0]),
+				})
+			}
+			if r.cfg.IPv6Access {
 				if ipv6, ok := r.getIPv6Cache(name); ok {
 					resp.Extra = append(resp.Extra, &dns.AAAA{
 						Hdr: dns.RR_Header{
@@ -1118,7 +1141,6 @@ func (r *Resolver) answer(ctx context.Context, req, resp *dns.Msg, parentdsrr []
 			}
 		}
 	}
-	return resp, nil
 }
 
 func (r *Resolver) authority(ctx context.Context, req, resp *dns.Msg, parentdsrr []dns.RR, otype uint16) (*dns.Msg, error) {
@@ -1436,7 +1458,9 @@ func (r *Resolver) newDialer(ctx context.Context, proto string, version authcach
 	return d
 }
 
-func (r *Resolver) searchCache(q dns.Question, cd bool, origin string) (servers *authcache.AuthServers, parentdsrr []dns.RR, level int) {
+func (r *Resolver) searchCache(q dns.Question, cd bool, origin string) (
+	servers *authcache.AuthServers, parentdsrr []dns.RR, level int) {
+
 	if q.Qtype == dns.TypeDS {
 		next, end := dns.NextLabel(q.Name, 0)
 
@@ -1462,6 +1486,7 @@ func (r *Resolver) searchCache(q dns.Question, cd bool, origin string) (servers 
 		return ns.Servers, ns.DSRR, dns.CompareDomainName(origin, q.Name)
 	}
 
+	// 如果支持DNSSEC的权威没找到，则重新查询不支持DNSSEC的权威（downgrade）
 	if !cd {
 		key := cache.Hash(q, true)
 		ns, err := r.ncache.Get(key)
@@ -1585,6 +1610,7 @@ func (r *Resolver) lookupDS(ctx context.Context, qname string) (msg *dns.Msg, er
 func (r *Resolver) lookupNSAddrV4(ctx context.Context, qname string, cd bool) (addrs []string, err error) {
 	log.Debug("Lookup NS ipv4 address", "qname", qname)
 
+	// 如果缓存里已经有NS的IP地址了，则直接返回
 	if addrs, ok := r.getIPv4Cache(qname); ok {
 		return addrs, nil
 	}

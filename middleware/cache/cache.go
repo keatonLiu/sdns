@@ -25,16 +25,20 @@ import (
 
 // Cache type
 type Cache struct {
+	// negative cache
 	ncache  *cache.Cache
 	ncap    int
 	nttl    time.Duration
 	minnttl time.Duration
 
+	// positive cache
 	pcache  *cache.Cache
 	pcap    int
 	pttl    time.Duration
 	minpttl time.Duration
 
+	// Cache prefetch before expire. The default threshold is 10%, 0 for disabled.
+	// The threshold percent should be between 10% ~ 90%.
 	prefetch uint32
 
 	// ratelimit
@@ -114,7 +118,7 @@ func (c *Cache) ServeDNS(ctx context.Context, ch *middleware.Chain) {
 		return
 	}
 
-	// check purge query
+	// check purge query (Only for API)
 	if q.Qclass == dns.ClassCHAOS && q.Qtype == dns.TypeNULL {
 		if qname, qtype, ok := dnsutil.ParsePurgeQuestion(req); ok {
 			c.purge(qname, qtype)
@@ -140,9 +144,11 @@ func (c *Cache) ServeDNS(ctx context.Context, ch *middleware.Chain) {
 	if !w.Internal() {
 		c.wg.Wait(key)
 	}
+	// ==================================================================
 
 	now := c.now().UTC()
 
+	// Real key for search response
 	key = cache.Hash(q, req.CheckingDisabled)
 	i, found := c.get(key, now)
 	if i != nil && found {
@@ -178,6 +184,7 @@ func (c *Cache) ServeDNS(ctx context.Context, ch *middleware.Chain) {
 			m = c.additionalAnswer(ctx, m)
 		}
 
+		// go to the response writer of next middleware to write response
 		_ = w.WriteMsg(m)
 		ch.Cancel()
 
@@ -250,26 +257,6 @@ func (w *ResponseWriter) WriteMsg(res *dns.Msg) error {
 	if duration > 0 {
 		w.set(key, res, mt, duration)
 		// TODO: can modify cache here
-		//if res.Question[0].Name == "www.baidu.com." && res.Question[0].Qtype == dns.TypeA {
-		//	log.Debug("Modifying cache")
-		//	if i, ok := w.pcache.Get(key); ok {
-		//		itm := i.(*item)
-		//		itm.Answer = []dns.RR{
-		//			&dns.A{
-		//				Hdr: dns.RR_Header{
-		//					Name:   "www.baidu.com.",
-		//					Rrtype: dns.TypeA,
-		//					Class:  dns.ClassINET,
-		//				},
-		//				A: net.ParseIP("10.10.10.10"),
-		//			},
-		//		}
-		//		itm.origTTL = 150
-		//		w.pcache.Add(key, i)
-		//	} else {
-		//		log.Debug("Cache not found")
-		//	}
-		//}
 	}
 
 	if !w.Internal() {
